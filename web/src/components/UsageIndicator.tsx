@@ -43,6 +43,7 @@ import { useStore } from '../store';
 import { consumeOpenaiResetCredit, send } from '../ws';
 import { formatMinorCurrency, formatSpendUsd, formatTokens, usageColor } from '../lib/format';
 import { useIsPhone } from '../lib/layout';
+import { useIsGuest } from '../lib/can';
 import { ProviderBadge } from './ProviderMark';
 
 /** Anthropic names its windows with stable keys, so the label is a lookup. OpenAI
@@ -469,8 +470,11 @@ interface PlanUsageChipProps {
   title: string;
   /** Account line at the foot of the dropdown; absent renders no footer. */
   accountLabel?: string;
-  /** Copy and message for the footer's disconnect action. */
-  signOut: { label: string; message: ClientMessage };
+  /** Copy and message for the footer's disconnect action. Only read with
+   *  `accountLabel`, so a chip without a footer passes none. */
+  signOut?: { label: string; message: ClientMessage };
+  /** Dimmed line under the heading, saying whose plan this is (machine guest). */
+  subtitle?: string;
   /** The provider's own usage page, linked from the footer. */
   manageUrl?: { label: string; href: string };
   /** This provider's reset credits can be redeemed from the chip (OpenAI only). */
@@ -592,6 +596,7 @@ function PlanUsageDetails({
   hideTitle,
   accountLabel,
   signOut,
+  subtitle,
   manageUrl,
   canResetLimit,
   allTimeRows,
@@ -626,6 +631,11 @@ function PlanUsageDetails({
             </Badge>
           )}
         </Group>
+      )}
+      {subtitle && (
+        <Text size="xs" c="dimmed">
+          {subtitle}
+        </Text>
       )}
       {/* One generic line, not per-cause copy: the client cannot tell "first fetch
           pending" from "token rejected". The footer below stays — Disconnect and
@@ -682,6 +692,8 @@ function PlanUsageDetails({
           </div>
         );
       })}
+      {/* A machine guest never sees this or the credit notes above: `guestUsage`
+          strips `credits` on the bridge. */}
       {usage?.credits && <CreditsRow provider={provider} credits={usage.credits} />}
       {canResetLimit && usage?.resetCreditsAvailable ? (
         <ResetCreditsRow
@@ -729,15 +741,17 @@ function PlanUsageDetails({
                   {manageUrl.label}
                 </Anchor>
               )}
-              <Anchor
-                component="button"
-                type="button"
-                size="xs"
-                c="red"
-                onClick={() => send(signOut.message)}
-              >
-                {signOut.label}
-              </Anchor>
+              {signOut && (
+                <Anchor
+                  component="button"
+                  type="button"
+                  size="xs"
+                  c="red"
+                  onClick={() => send(signOut.message)}
+                >
+                  {signOut.label}
+                </Anchor>
+              )}
             </Group>
           </Group>
         </>
@@ -758,6 +772,10 @@ function rowsFor(spend: Record<string, ModelSpend>, provider: ModelProvider): [s
  * yet (first fetch pending, failed, or a rejected token) shows an empty ring and
  * says so, rather than vanishing. A logged-out provider still gets no chip: this
  * is not a "connect OpenAI" affordance — Settings → Account owns that.
+ *
+ * A machine guest sees the host's plan windows read only — their turns spend
+ * them — with no spend, credits, account or Disconnect. They are never told the
+ * host's login, so a provider with no reading gets no chip rather than an empty one.
  */
 export function UsageIndicator() {
   const usage = useStore((s) => s.usage);
@@ -772,14 +790,16 @@ export function UsageIndicator() {
   // purpose: a hook placed after it would break hook order.
   const [period, setPeriod] = useState<Period>({ g: 'all', anchor: dayKey(Date.now()) });
   const isPhone = useIsPhone();
+  const isGuest = useIsGuest();
+  const hostName = useStore((s) => s.access?.ownerProfile?.name);
 
   // Login alone decides the chip, independent of usage-message timing (no login
   // also covers API-key users). A missing or windowless snapshot renders empty.
-  const showClaude = Boolean(auth?.loggedIn);
-  const showOpenai = Boolean(openaiAuth?.loggedIn);
-  if (!showClaude && !showOpenai) return null;
   const claudeData = usage && usage.windows.length > 0 ? usage : null;
   const openaiData = openaiUsage && openaiUsage.windows.length > 0 ? openaiUsage : null;
+  const showClaude = isGuest ? claudeData !== null : Boolean(auth?.loggedIn);
+  const showOpenai = isGuest ? openaiData !== null : Boolean(openaiAuth?.loggedIn);
+  if (!showClaude && !showOpenai) return null;
 
   // Rollup over the sessions the store already holds — deleting a session drops
   // its spend, and a session that hasn't had a turn since `costByModel` existed
@@ -797,6 +817,18 @@ export function UsageIndicator() {
   const tzNote = spendHistory?.tz && spendHistory.tz !== browserTz ? spendHistory.tz : null;
 
   const shared = { period, onPeriod: setPeriod, tzNote, models };
+  // A guest's chip: the windows alone. No account footer, no reset redeem, and
+  // empty spend rows so neither the spend section nor the period picker renders.
+  const guest = {
+    subtitle: hostName ? `${hostName}’s plan` : 'Host’s plan',
+    accountLabel: undefined,
+    signOut: undefined,
+    manageUrl: undefined,
+    canResetLimit: false,
+    allTimeRows: [],
+    periodRows: [],
+    sessionRows: [],
+  };
   const chips: PlanUsageChipProps[] = [];
   if (showClaude) {
     chips.push({
@@ -810,6 +842,7 @@ export function UsageIndicator() {
       periodRows: rowsFor(periodSpend, 'anthropic'),
       sessionRows: rowsFor(sessionSpend, 'anthropic'),
       ...shared,
+      ...(isGuest ? guest : {}),
     });
   }
   if (showOpenai) {
@@ -825,6 +858,7 @@ export function UsageIndicator() {
       periodRows: rowsFor(periodSpend, 'openai'),
       sessionRows: rowsFor(sessionSpend, 'openai'),
       ...shared,
+      ...(isGuest ? guest : {}),
     });
   }
 

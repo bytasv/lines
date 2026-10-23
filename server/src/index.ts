@@ -64,7 +64,7 @@ import {
 } from './connectionPolicy.ts';
 import { APP_ROOT, isValidStoreId, userStoreRoot } from './store.ts';
 import { UserRegistry } from './userRegistry.ts';
-import { READ_ONLY_SESSION, type BrowserLink, type UserContext } from './userContext.ts';
+import { READ_ONLY_SESSION, guestUsage, type BrowserLink, type UserContext } from './userContext.ts';
 import { handleFileRequest } from './fileRoutes.ts';
 import {
   clampPermissionMode,
@@ -1169,7 +1169,7 @@ async function handleConnection(
  * For the owner this is everything, unchanged. For a guest it is deliberately
  * thin: their sessions (scope-filtered), the health of the machine they are
  * borrowing, and what they may do — and *nothing* about the host's account,
- * settings or usage. The workflow library only as far as `guestLibrary` allows. Projects only for a machine share. That narrowing does double duty: a shared
+ * settings or spend; a machine guest gets the plan windows only (`guestUsage`). The workflow library only as far as `guestLibrary` allows. Projects only for a machine share. That narrowing does double duty: a shared
  * machine's `hello` contributes only sessions, so a client holding two machines
  * at once never has to merge two sets of owner state.
  */
@@ -1209,10 +1209,13 @@ function buildHello(
       // shared session group under the project the guest already has open. It
       // names no path the guest may reach.
       projectKeys: ctx.projectKeys.all(),
-      usage: null,
-      // Both plan-usage chips are the host's business, not a guest's.
-      openaiUsage: null,
-      // As is what the host has spent, on any day.
+      // A machine guest's turns spend the host's plan windows, so they see them,
+      // read only. The account and the money stay private: `guestUsage` keeps the
+      // windows, the plan name and the limit flag, never credits. A session share
+      // gets neither chip.
+      usage: access.scope === 'machine' ? guestUsage(ctx.usage.snapshot) : null,
+      openaiUsage: access.scope === 'machine' ? guestUsage(ctx.openaiUsage.snapshot) : null,
+      // What the host has spent, on any day, is theirs alone.
       spendHistory: null,
       // The host's Claude account is theirs alone: a guest is told nothing about
       // it, not even the email. Turns run on the host's token regardless.

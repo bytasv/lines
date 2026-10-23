@@ -107,7 +107,8 @@ Every place spend is measured and shown, all fed by the same accumulate-on-`resu
 - `UsageSnapshot`, `UsageWindow`, `UsageCredits`, `ResetCreditOutcome` (`shared/types.ts`)
 - `planLabelFromProfile` (`server/src/usage.ts`) — pure mapping of the OAuth profile to a plan label
 - `OpenaiUsagePoller.consumeResetCredit` (`server/src/openaiUsage.ts`) — redeems an OpenAI reset credit
-- `UsageIndicator` — renders the chip, gated on `auth.loggedIn`
+- `UsageIndicator` — renders the chip, gated on `auth.loggedIn` for the owner and on a non-null snapshot for a machine guest
+- `guestUsage` (`server/src/userContext.ts`) — the allowlist that cuts a snapshot down to the windows, plan and limit flag for a machine guest
 - `windowElapsed` (`web/src/components/UsageIndicator.tsx`) — true when a window's reset time has passed
 - `ModelSpend` — `{ costUsd, tokens, turns }` for one model id
 - `ModelSpendMap` — `Record<modelId, ModelSpend>`
@@ -213,6 +214,12 @@ independent of the usage poll. Redeeming a reset credit is the one write: the br
 `openaiConsumeResetCredit`, the bridge runs it through a short-lived `codex app-server`, and the
 answer returns as `openaiResetCreditResult` to the asking connection only; on `reset` the bridge
 re-fetches immediately so every tab sees the cleared window.
+
+A machine-scope guest sees the host's plan windows read only, because their turns spend them. The
+bridge sends them `guestUsage(snapshot)` in `hello` and in each `usage`/`openaiUsage` broadcast, never
+the full snapshot, so the host's credits, reset credits, spend, email and disconnect stay on the host's
+machine. The browser stores each machine's snapshot on its own view and copies it to the globals only
+when that machine is the primary one, so a background shared machine never replaces the owner's chip.
 
 ### Spend by model
 

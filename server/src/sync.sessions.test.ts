@@ -14,6 +14,8 @@ import { StorageSyncClient } from './sync.ts';
 const BUDGET = 1.5 * 1024 * 1024;
 /** Session pushes are debounced (PUSH_DEBOUNCE_MS, 2s), so a short wait sees nothing. */
 const DEBOUNCE_WAIT_MS = 2_200;
+/** The first retry after a failed push: twice PUSH_DEBOUNCE_MS (2s), plus margin. */
+const RETRY_WAIT_MS = 4_500;
 const flush = (ms = 50) => new Promise((r) => setTimeout(r, ms));
 
 interface Sent {
@@ -116,9 +118,11 @@ test('a rejected push keeps its metas and does not advance the watermark', async
   assert.deepEqual(persisted, [], 'a rejected batch must not move the push watermark');
 
   // The failed batch is requeued, so the next push carries it along rather than dropping it.
+  // The retry waits out its own backoff (twice the debounce), not the debounce: waiting
+  // less would let its timer fire later, into the next test's captured fetch.
   status = 200;
   sync.pushSession(meta('c'));
-  await flush(DEBOUNCE_WAIT_MS);
+  await flush(RETRY_WAIT_MS);
 
   const retry = sessionPuts(sent)[1];
   assert.deepEqual(idsOf([retry]), ['a', 'b', 'c'], 'a rejected batch must not be lost');

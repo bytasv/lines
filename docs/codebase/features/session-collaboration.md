@@ -412,8 +412,9 @@ The relay's `onToken` handler still uses `registry.peek()` (never mints) instead
 
 `buildHello` gives a guest their sessions (scope-filtered), the machine's health, and
 `access: { scope, caps, sessionIds?, ownerProfile, deviceId }` — and nothing account-wide:
-`recipes`, `usage`, `auth`, `settings`, `guardAllowlist` are all empty/omitted for a guest, and so
-are `workflows`/`steps` except as described below. `projects`/`projectKeys` are the one exception, and only at machine
+`recipes`, `auth`, `settings`, `guardAllowlist` are all empty/omitted for a guest, and so
+are `workflows`/`steps` except as described below. `usage`/`openaiUsage` are the one account-side
+exception at machine scope, and only as the plan windows (see below). `projects`/`projectKeys` are the one exception, and only at machine
 scope: a machine share lends the whole machine, and sessions are created inside its projects, so
 that scope gets the host's real list, live (see below). A machine-scope guest who may create
 sessions likewise gets the host's workflow library read-only (`guestLibrary`), in `hello` and in
@@ -444,7 +445,8 @@ message reaches only sockets whose scope covers it; an account-wide message (no 
 reaches the owner only, except `workerStatus`/`storageStatus` — a guest whose turns are about to
 fail needs to know why, and neither carries anything private — and, at machine scope only,
 `projects`/`projectKeys`, so opening or closing a project reaches a machine guest live rather than
-waiting for their next `hello`.
+waiting for their next `hello`. The same scope also gets the host's plan usage windows, cut down to
+`guestUsage` (no credits or reset credits), in `hello` and in later `usage`/`openaiUsage` broadcasts.
 
 ### Presence
 
@@ -598,6 +600,9 @@ resolves a person through — so they can never disagree about who somebody is.
 - A machine-scope grant's `hello` carries the host's real `projects`/`projectKeys`, and later
   `projects`/`projectKeys` broadcasts reach it too, so the guest's project tabs track the host's
   live. A session share still gets neither — it has no folder of its own to browse.
+- A machine-scope guest also sees the host's plan usage windows read only, shown only when the host has
+  a reading; the host's credits, reset credits, spend, account email and disconnect never leave the
+  host's machine. A session share sees no usage.
 - A machine-scope guest's sidebar matches the owner's: each session sits under its own project tab,
   with no Shared-with-me group. Only a session-scope guest gets Shared-with-me.
 - A machine-scope grant covers every session on the machine and outranks a session share on the

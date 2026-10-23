@@ -199,6 +199,7 @@ export const emptyMachine = (deviceId: string): MachineSlice => ({
  */
 export function machineView(msg: Hello, prev: MachineView): MachineView {
   const projectKeys = msg.projectKeys ?? {};
+  const machineGuest = msg.access?.scope === 'machine';
   return {
     // A session share is sent no project list — it has no folder of its own —
     // so its tabs are built from the sessions shared with it. A machine share is
@@ -226,10 +227,11 @@ export function machineView(msg: Hello, prev: MachineView): MachineView {
     models: msg.models,
     // A bridge restart sends hello before its first usage fetch completes; keep
     // the last good snapshot rather than flickering the chip away — but drop it
-    // once the account behind it is gone.
-    usage: msg.usage ?? (msg.auth.loggedIn ? prev.usage : null),
+    // once the account behind it is gone. A machine guest is never told the
+    // host's login, so their snapshot is kept on the same restart grounds.
+    usage: msg.usage ?? (msg.auth.loggedIn || machineGuest ? prev.usage : null),
     // Same rule as `usage`, against the OpenAI account.
-    openaiUsage: msg.openaiUsage ?? (msg.openaiAuth?.loggedIn ? prev.openaiUsage : null),
+    openaiUsage: msg.openaiUsage ?? (msg.openaiAuth?.loggedIn || machineGuest ? prev.openaiUsage : null),
     auth: msg.auth,
     // Absent on a bridge older than this field — degrades to "no OpenAI account",
     // which is exactly what such a bridge can offer.

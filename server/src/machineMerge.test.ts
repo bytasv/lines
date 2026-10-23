@@ -229,6 +229,20 @@ describe('machineView', () => {
     assert.equal(machineView(hello({ auth: { loggedIn: false } }), prev).usage, null);
   });
 
+  test("a machine guest's hello keeps the last good usage snapshot; a session guest's drops it", () => {
+    // A guest is never told the host's login, so `auth` cannot gate the carry-forward.
+    const prev: MachineView = { ...emptyView(), usage: { pct: 40 } as never, openaiUsage: { pct: 7 } as never };
+    const access = (scope: 'machine' | 'session') => ({
+      access: { scope, caps: {} as never, ownerProfile: null, deviceId: 'B' },
+    });
+    const machine = machineView(hello(access('machine')), prev);
+    assert.deepEqual(machine.usage, { pct: 40 });
+    assert.deepEqual(machine.openaiUsage, { pct: 7 });
+    const session = machineView(hello(access('session')), prev);
+    assert.equal(session.usage, null);
+    assert.equal(session.openaiUsage, null);
+  });
+
   test('switching machines swaps the whole view from the new slice', () => {
     // `setPrimaryMachine` spreads exactly this object over the globals — every
     // field of a view is named after its global counterpart — so a switch and a

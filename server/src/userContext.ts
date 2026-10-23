@@ -1,5 +1,5 @@
 import { devRuntime } from './devRuntime.ts';
-import type { ServerMessage, SessionMeta, SocketAccess, UserUiSettings } from '@lines/shared';
+import type { ServerMessage, SessionMeta, SocketAccess, UsageSnapshot, UserUiSettings } from '@lines/shared';
 import { allSessionGroups, findWorktree, isSessionMuted, projectRoots } from '@lines/shared';
 import { createStore, type Store } from './store.ts';
 import { AuthManager } from './auth.ts';
@@ -150,7 +150,9 @@ export function sessionIdOf(msg: ServerMessage): string | null {
  * The exceptions are the machine's own health, `workerStatus` and
  * `storageStatus` — a guest whose turns are about to fail needs to know why, and
  * neither carries anything private — and, for a machine share only, `projects`
- * and `projectKeys`, plus the workflow library when the grant may create sessions.
+ * and `projectKeys`, the plan usage windows (`usage` / `openaiUsage`, sanitized
+ * by `guestPayloadFor` in `fanOut`), plus the workflow library when the grant may
+ * create sessions.
  */
 export function mayReceive(
   msg: ServerMessage,
@@ -168,6 +170,11 @@ export function mayReceive(
   if (access.scope === 'machine' && (msg.type === 'projects' || msg.type === 'projectKeys')) {
     return true;
   }
+  // A machine guest's turns spend the host's plan windows, so they see them; the
+  // payload is cut down to `guestUsage` before it is sent.
+  if (access.scope === 'machine' && (msg.type === 'usage' || msg.type === 'openaiUsage')) {
+    return true;
+  }
   // A machine guest who may start sessions sees the host's workflow library (see
   // `buildHello`) so they can start one with a workflow; it follows live too.
   // Read only — authoring stays owner-only in MESSAGE_AUTHZ.
@@ -179,6 +186,26 @@ export function mayReceive(
     return true;
   }
   return msg.type === 'workerStatus' || msg.type === 'storageStatus' || msg.type === 'pong';
+}
+
+/**
+ * The part of a plan usage snapshot a machine guest may see: the windows their
+ * turns spend, the plan name and whether the limit is hit. An allowlist, so the
+ * money (`credits`, reset credits) and any field added later stay on the machine.
+ */
+export function guestUsage(snapshot: UsageSnapshot | null): UsageSnapshot | null {
+  if (!snapshot) return null;
+  const { windows, fetchedAt, plan, limitReached } = snapshot;
+  return { windows, fetchedAt, plan, limitReached };
+}
+
+/**
+ * The version of a broadcast a guest socket gets instead, or undefined when it is
+ * sent to guests unchanged.
+ */
+export function guestPayloadFor(msg: ServerMessage): ServerMessage | undefined {
+  if (msg.type === 'usage' || msg.type === 'openaiUsage') return { ...msg, usage: guestUsage(msg.usage) };
+  return undefined;
 }
 
 /**
@@ -361,6 +388,8 @@ export function buildUserContext(
 
   const fanOut = (msg: ServerMessage) => {
     const payload = JSON.stringify(msg);
+    // Serialized at most once, and only when a guest socket is due a cut-down copy.
+    let guestPayload: string | undefined;
     const sessionId = sessionIdOf(msg);
     for (const [ws, access] of sockets) {
       if (ws.readyState !== LINK_OPEN) continue;
@@ -375,6 +404,14 @@ export function buildUserContext(
         ws.close(1013, 'too slow');
         // No sockets.delete here — the 'close' handler owns removal, and
         // readyState has already left OPEN so the next broadcast skips it.
+        continue;
+      }
+      if (access.scope !== 'owner') {
+        if (guestPayload === undefined) {
+          const guestMsg = guestPayloadFor(msg);
+          guestPayload = guestMsg ? JSON.stringify(guestMsg) : payload;
+        }
+        ws.send(guestPayload);
         continue;
       }
       ws.send(payload);

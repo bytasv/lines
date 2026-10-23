@@ -2720,12 +2720,29 @@ export const useStore = create<UiState>((set, get) => {
           composerPrefill: { ...state.composerPrefill, [msg.sessionId]: msg.prompt },
         }));
         break;
-      case 'usage':
-        set({ usage: msg.usage });
+      // Per machine, like `projects`: a machine share receives the host's plan
+      // windows too (see `mayReceive`), and they must not overwrite the chip of
+      // the machine on screen.
+      case 'usage': {
+        const slice = get().machines[from];
+        if (slice) {
+          set((state) => ({
+            machines: { ...state.machines, [from]: { ...slice, view: { ...slice.view, usage: msg.usage } } },
+          }));
+        }
+        if (fromPrimary) set({ usage: msg.usage });
         break;
-      case 'openaiUsage':
-        set({ openaiUsage: msg.usage });
+      }
+      case 'openaiUsage': {
+        const slice = get().machines[from];
+        if (slice) {
+          set((state) => ({
+            machines: { ...state.machines, [from]: { ...slice, view: { ...slice.view, openaiUsage: msg.usage } } },
+          }));
+        }
+        if (fromPrimary) set({ openaiUsage: msg.usage });
         break;
+      }
       case 'turnSpend':
         set((state) => {
           const turnSpend = { ...state.turnSpend };

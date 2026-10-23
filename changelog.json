@@ -1,6 +1,13 @@
 {
   "web": [
     {
+      "version": "0.1.30",
+      "date": "2026-10-23",
+      "items": [
+        "When someone shares a whole machine with you, you can now see the host's plan usage bars (5-hour and weekly limits, reset times) on the usage chip. Spend, credits, the account and Disconnect stay with the host."
+      ]
+    },
+    {
       "version": "0.1.29",
       "date": "2026-10-23",
       "items": [

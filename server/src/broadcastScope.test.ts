@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import type { ServerMessage, SessionMeta, SocketAccess } from '@lines/shared';
+import type { ServerMessage, SessionMeta, SocketAccess, UsageSnapshot } from '@lines/shared';
 import { OWNER_ACCESS, capsForPreset } from '@lines/shared';
-import { mayReceive, sessionIdOf } from './userContext.ts';
+import { guestPayloadFor, guestUsage, mayReceive, sessionIdOf } from './userContext.ts';
 
 /**
  * Who a broadcast reaches.
@@ -32,6 +32,7 @@ const ACCOUNT_WIDE: ServerMessage[] = [
   { type: 'workflows', workflows: [] } as ServerMessage,
   { type: 'steps', steps: [] } as unknown as ServerMessage,
   { type: 'usage', usage: null } as unknown as ServerMessage,
+  { type: 'openaiUsage', usage: null } as unknown as ServerMessage,
   { type: 'authStatus', auth: { loggedIn: true } } as unknown as ServerMessage,
   { type: 'guardAllowlist', entries: [] } as unknown as ServerMessage,
   // Names and URLs of the host's third-party servers — account-wide, so a guest
@@ -109,12 +110,13 @@ describe('broadcast scope', () => {
     );
   });
 
-  test('a machine guest gets every session, the projects and the workflow library, but no other account state', () => {
+  test('a machine guest gets every session, the projects, the workflow library and plan usage, but no other account state', () => {
     const machine: SocketAccess = { scope: 'machine', caps: capsForPreset('collaborator', 'machine') };
-    const projectState = new Set(['projects', 'projectKeys', 'workflows']);
+    // Plan usage is sent cut down to `guestUsage` (see the tests below).
+    const allowed = new Set(['projects', 'projectKeys', 'workflows', 'usage', 'openaiUsage']);
     for (const msg of SESSION_BEARING) assert.equal(mayReceiveMsg(msg, machine), true);
     for (const msg of ACCOUNT_WIDE) {
-      assert.equal(mayReceiveMsg(msg, machine), projectState.has(msg.type), msg.type);
+      assert.equal(mayReceiveMsg(msg, machine), allowed.has(msg.type), msg.type);
     }
     assert.equal(
       mayReceiveMsg({ type: 'projectKeys', projectKeys: {} } as ServerMessage, machine),
@@ -141,5 +143,47 @@ describe('broadcast scope', () => {
     }
     // Step libraries stay owner-only: their client reducers are not per machine.
     assert.equal(mayReceiveMsg({ type: 'steps', steps: [] } as unknown as ServerMessage, full), false);
+  });
+});
+
+describe('guest plan usage', () => {
+  const snapshot: UsageSnapshot = {
+    windows: [{ id: 'five_hour', utilization: 42, resetsAt: null }],
+    fetchedAt: 1000,
+    plan: 'Max 20x',
+    limitReached: false,
+    credits: { enabled: true, usedMinor: 500, limitMinor: 10000, currency: 'USD' },
+    resetCreditsAvailable: 2,
+    resetCreditsApplicable: 1,
+  };
+
+  test('guestUsage keeps the windows and plan, and drops the money', () => {
+    assert.deepEqual(guestUsage(snapshot), {
+      windows: snapshot.windows,
+      fetchedAt: 1000,
+      plan: 'Max 20x',
+      limitReached: false,
+    });
+  });
+
+  test('guestUsage of no reading is no reading', () => {
+    assert.equal(guestUsage(null), null);
+  });
+
+  test('a guest socket is sent the sanitized usage broadcast', () => {
+    for (const type of ['usage', 'openaiUsage'] as const) {
+      const msg = { type, usage: snapshot } as ServerMessage;
+      const payload = JSON.parse(JSON.stringify(guestPayloadFor(msg)));
+      assert.equal(payload.type, type);
+      assert.equal(payload.usage.credits, undefined, `${type} leaked credits`);
+      assert.equal(payload.usage.resetCreditsAvailable, undefined);
+      assert.equal(payload.usage.resetCreditsApplicable, undefined);
+      assert.deepEqual(payload.usage.windows, snapshot.windows);
+    }
+  });
+
+  test('other broadcasts reach a guest unchanged', () => {
+    assert.equal(guestPayloadFor({ type: 'projects', projects: [] } as unknown as ServerMessage), undefined);
+    assert.equal(guestPayloadFor({ type: 'sessionDeleted', sessionId: 's1' } as ServerMessage), undefined);
   });
 });
