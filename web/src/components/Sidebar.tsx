@@ -115,8 +115,9 @@ const ACTIVE_DROP = 'active';
 const GROUP_DROP_PREFIX = 'group:';
 
 /**
- * A section rows can be dragged into. `label` gives an empty section something to
- * drop on; otherwise the section's own content is the target.
+ * A section rows can be dragged into. `label` gives an empty (or collapsed)
+ * section something to drop on, below whatever it already shows; otherwise the
+ * section's own content is the target.
  */
 function SessionDrop({ id, label, children }: { id: string; label?: string; children: ReactNode }) {
   return (
@@ -131,12 +132,12 @@ function SessionDrop({ id, label, children }: { id: string; label?: string; chil
             background: snapshot.isDraggingOver ? 'var(--mantine-color-default-hover)' : undefined,
           }}
         >
+          {children}
           {label && (
             <Text size="xs" c="dimmed" ta="center" py={6}>
               {label}
             </Text>
           )}
-          {children}
           {provided.placeholder}
         </div>
       )}
@@ -465,29 +466,6 @@ const SessionRow = memo(function SessionRow({
           onSubmit={(name) => groupKey && moveToGroup(createGroup(groupKey, name))}
         >
           <Group gap={2} wrap="nowrap">
-            {!isPhone && canGroup && (
-              <Menu withinPortal position="bottom-end">
-                <Menu.Target>
-                  {/* `stop` on the Tooltip, not the icon: Tooltip spreads its child's
-                      own props last, so an icon onClick would replace the toggle
-                      Menu.Target chains after this one. */}
-                  <Tooltip label="Move to group" onClick={stop}>
-                    <ActionIcon
-                      size="xs"
-                      variant="subtle"
-                      color="gray"
-                      aria-label={`Move ${session.name} to group`}
-                    >
-                      <IconFolderSymlink size={13} />
-                    </ActionIcon>
-                  </Tooltip>
-                </Menu.Target>
-                <Menu.Dropdown onClick={stop}>
-                  <Menu.Label>Move to group</Menu.Label>
-                  {groupItems}
-                </Menu.Dropdown>
-              </Menu>
-            )}
             {!canManage && !canDelete ? null : isPhone ? (
               <Menu withinPortal position="bottom-end">
                 <Menu.Target>
@@ -1887,7 +1865,16 @@ export function Sidebar({
                             <div ref={dragProvided.innerRef} {...dragProvided.draggableProps}>
                               {/* The whole section is the drop target, header included,
                                   so a collapsed group still takes a dropped session. */}
-                              <SessionDrop id={`${GROUP_DROP_PREFIX}${group.id}`}>
+                              <SessionDrop
+                                id={`${GROUP_DROP_PREFIX}${group.id}`}
+                                // A new (empty) or collapsed group is just its header,
+                                // too thin to aim at, so it opens a zone while dragging.
+                                label={
+                                  draggingSession && (members.length === 0 || collapsed.has(group.id))
+                                    ? 'Drop here'
+                                    : undefined
+                                }
+                              >
                                 <UserGroupSection
                                   group={group}
                                   index={i}

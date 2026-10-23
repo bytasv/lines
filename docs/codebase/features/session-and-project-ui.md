@@ -56,8 +56,9 @@ and how status is surfaced in the sidebar row and the project tab.
   and mute flag are synced settings (`UserUiSettings.sessionGroups`). Sections run Shared-with-me
   (session-scope guests only), Active (ungrouped), user groups in array order, then Archived. Groups collapse per browser
   (`lines.collapsedGroups`, reserved id `archived` for the Archived section) and are reordered by
-  dragging their header or with Move up/down. Sessions move between sections by drag, or by the
-  row's "Move to group" control. A muted group (see business rules) silences its sessions for
+  dragging their header or with Move up/down. Sessions move between sections by drag (an empty
+  or collapsed group opens a "Drop here" zone while dragging), or on a phone by the row ⋯ menu's
+  "Move to group". A muted group (see business rules) silences its sessions for
   notifications, the tab dot and auto-select without stopping them.
 
 ## Entry points
@@ -94,8 +95,8 @@ and how status is surfaced in the sidebar row and the project tab.
   `SESSION_SORT_ORDER`/`SESSION_SORT_RANK`, `lastActivityAt`, `compareSessions`
 - `web/src/components/ProjectTabs.tsx` — `ProjectTab` folder/dot swap and tooltip
 - `server/src/sessions.ts` — `askPermission`, `setStatus`, `reconcileWithWorker`, `adoptSynced`
-- `web/src/components/Sidebar.tsx` — badge label/color lookup; session groups (sections, row
-  "Move to group", drag between sections, manual order prompt)
+- `web/src/components/Sidebar.tsx` — badge label/color lookup; session groups (sections, phone
+  row "Move to group", drag between sections, manual order prompt)
 - `web/src/components/SessionGroupSection.tsx` — the shared collapsible section header (used for
   user groups and Archived), its urgent-dot and mute indicator, and the name popover
 - `web/src/lib/alerts.ts` — notification body text; `maybeAlert`'s background-tasks early return
