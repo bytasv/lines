@@ -306,6 +306,7 @@
     }
   ],
   "desktopPending": [
-    "The plan-usage chip no longer passes an old reading off as current: a window past its reset dims until a fresh reading arrives, and the chip refreshes shortly after each reset."
+    "The plan-usage chip no longer passes an old reading off as current: a window past its reset dims until a fresh reading arrives, and the chip refreshes shortly after each reset.",
+    "When someone shares a whole machine with you, you can now see the host's plan usage bars (5-hour and weekly limits, reset times) on the usage chip. Spend, credits, the account and Disconnect stay with the host."
   ]
 }
