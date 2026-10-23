@@ -28,7 +28,7 @@ Otherwise sync is automatic — on turn completion and on websocket connect/reco
 
 ## Symbols
 
-- `MemorySyncer.collectChanged` — mtime-diff against the manifest; returns only changed/deleted files
+- `MemorySyncer.collectChanged` — mtime-diff against the manifest; returns the changed/deleted files and a `commit` that advances the manifest
 - `MemorySyncer.collectAll` — full snapshot for a fresh sync, size-capped
 - `MemorySyncer.reviewRemote` — *stages* what a pull would write; touches no file
 - `MemorySyncer.acceptReview` / `rejectReview` — the only paths that write or discard
@@ -37,7 +37,7 @@ Otherwise sync is automatic — on turn completion and on websocket connect/reco
 
 ## Data flow
 
-On each SDK `result` message, `MemorySyncer.collectChanged()` mtime-diffs the allowlisted files against `memory-manifest.json` and pushes only what changed (`sync.pushMemory`); this also catches hand-edits made outside a turn, for free. On websocket connect/reconnect, `syncNow` pulls `GET /memory` and hands it to `reviewRemote` (after project-key merge/learn, so slug→key resolution is as complete as possible), which computes the writes it *would* make and stages them for the user. Nothing reaches disk until they accept. It then pushes a full `collectAll()` snapshot so a fresh storage server converges to this machine's state.
+On each SDK `result` message, `MemorySyncer.collectChanged()` mtime-diffs the allowlisted files against `memory-manifest.json` and pushes only what changed (`sync.pushMemory`); this also catches hand-edits made outside a turn, for free. The manifest advances only once storage has accepted the push, so a push that fails or is made while offline is retried rather than recorded as synced. On websocket connect/reconnect, `syncNow` pulls `GET /memory` and hands it to `reviewRemote` (after project-key merge/learn, so slug→key resolution is as complete as possible), which computes the writes it *would* make and stages them for the user. Nothing reaches disk until they accept. It then pushes a full `collectAll()` snapshot so a fresh storage server converges to this machine's state.
 
 Server-side, `PUT /memory` merges the incoming map into the stored blob per-file, last-write-wins by each entry's `updatedAt` (sourced from file mtime) — never a whole-blob replace, since each machine only ever sees its own disk.
 
@@ -51,6 +51,7 @@ Project-scoped files are keyed by a machine-independent project key (`project/<p
 
 ## Business rules
 
+- A change is recorded as synced only after storage accepts it. While the cloud is unreachable, memory changes wait in the sync outbox and are sent on recovery.
 - Only two locations are synced: `~/.claude/CLAUDE.md` and `~/.claude/projects/<slug>/memory/**`. `<cwd>/CLAUDE.md`, `<cwd>/.claude/`, `~/.claude/settings.json`, and credential files are never touched.
 - Per-file entry cap 256 KB; entries over the cap are skipped, not truncated.
 - Client-side full-snapshot push additionally caps total payload at ~1.5 MB, dropping the largest files first (logged via a one-time warning) if the cap is exceeded.

@@ -517,6 +517,25 @@ and push first. See [whats-new](whats-new.md).
   installing. `ship.mjs`/`check-unreleased.mjs`/`release-desktop.yml` are included: verified by a
   real dispatch (dry run, then a real one) rather than a test.
 
+## Local fallback window
+
+Behind `config.localFallback` (env `LINES_LOCAL_FALLBACK=1`, off by default), a hosted install keeps
+working when linesapp.cloud is down. The shell serves the `web/dist-local` bundle (built with
+`VITE_LINES_LOCAL_SHELL=1`, no Clerk and no storage URL) from its loopback server, and the bridge runs
+in `LINES_BRIDGE_DIRECT=token` mode.
+
+- The shell switches to this window on a failed load of the hosted page, on the relay being down for
+  20s, or when a 3s probe of the hosted page fails at cold start. It never shows an error page for
+  this.
+- The shell hands the per-boot bridge token to the page in the URL fragment. The page stashes it and
+  strips it from the address at once. The shell reloads the window whenever `bridge.json` changes.
+- The window returns to the hosted page after the cloud has been healthy for 60s, when no turn is
+  running, the composer is empty and no dialog is open. The sync indicator offers the same move by
+  hand.
+- The window has no preload or IPC. It reaches the shell only through `/__shell/status` and
+  `/__shell/return`, on the shell's own loopback origin.
+- Drafts typed in the local window stay in that origin's storage and do not appear in the hosted one.
+
 ## Business rules
 
 ### Logging and diagnostics

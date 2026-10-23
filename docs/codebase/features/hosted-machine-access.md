@@ -312,6 +312,13 @@ reaches `handleConnection`, nor therefore a `hello`. The policy, read once at st
   for ours. `null` (a sandboxed frame, a `file://` page) is refused like any stranger. No
   `Origin` at all is a non-browser client (tests, a CLI) and is admitted only from loopback.
   Every refusal here is `403`.
+- **Token gate** — `LINES_BRIDGE_DIRECT=token` is the desktop local fallback window's mode. A direct
+  socket must come from a loopback peer naming a loopback `Host`, carry an `Origin` equal to one of
+  `LINES_BRIDGE_ALLOWED_ORIGINS` (no `Origin` is refused), and present `lines.bt.<token>` as a
+  WebSocket subprotocol, compared in constant time. The per-boot token is the one written to the
+  0600 `bridge.json`. The query string is never read, and the server selects `lines` so the token
+  is not echoed back. Such a socket binds to the owner last seen on the relay (`last-owner.json`),
+  or to `'local'` when none has been seen.
 - **Direct off** — `LINES_BRIDGE_DIRECT=0` refuses every upgrade (`403`). The desktop app sets it
   in relay mode, where its own window is the hosted page and reaches the bridge through the relay,
   so nothing has a reason to open a socket on the bridge's port (see

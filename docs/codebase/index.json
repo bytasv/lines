@@ -1502,7 +1502,8 @@
         "only ~/.claude/CLAUDE.md and ~/.claude/projects/<slug>/memory/** are synced; cwd-local CLAUDE.md/.claude, settings.json, and credentials are never touched",
         "per-file entry cap 256 KB; full-snapshot push additionally caps total payload at ~1.5 MB, dropping largest files first",
         "server prunes tombstones older than ~30 days",
-        "conflict resolution is per-file last-write-wins by file mtime; the losing side's edit is silently dropped"
+        "conflict resolution is per-file last-write-wins by file mtime; the losing side's edit is silently dropped",
+        "a memory change is recorded as synced only after storage accepts it; while the cloud is unreachable it waits in the sync outbox"
       ],
       "architecturalRules": [
         "reuses the existing StorageSyncClient debounce-and-push pattern and syncNow pull-then-push cycle instead of a new sync mechanism",
@@ -1555,7 +1556,11 @@
         "putSessions",
         "putSession",
         "softDeleteSession",
-        "toWire"
+        "toWire",
+        "StorageSyncClient.isPendingDelete",
+        "StorageSyncClient.pending",
+        "Store.loadSyncOutbox",
+        "Store.saveSyncOutbox"
       ],
       "tests": [
         "server/src/sync.sessions.test.ts",
@@ -1604,12 +1609,13 @@
     },
     {
       "id": "storage-availability-banner",
-      "name": "Storage availability banner",
+      "name": "Storage availability and sync status",
       "doc": "features/storage-availability-banner.md",
-      "purpose": "Classify why the bridge's storage-server link is down, wait out a routine expired-token 401 instead of raising the \"cloud sync unavailable\" banner, actively re-probe once down so recovery is noticed within seconds, and persist a bounded failure log a user can read and copy from Settings without a bridge console.",
+      "purpose": "Tell a user, without alarming them, whether work is reaching the cloud and what is still waiting: a quiet header dot and popover instead of a banner. Classify why the bridge's storage link is down, wait out a routine expired-token 401, re-probe while down, flush the durable outbox on recovery, and keep a readable sync log.",
       "entryPoints": [
-        "web/src/components/StorageBanner.tsx",
-        "web/src/components/SyncSection.tsx"
+        "web/src/components/SyncIndicator.tsx",
+        "web/src/components/SyncSection.tsx",
+        "web/src/components/ConnectionBanner.tsx"
       ],
       "files": [
         "shared/types.ts",
@@ -1619,8 +1625,11 @@
         "server/src/fileRoutes.ts",
         "server/src/index.ts",
         "web/src/ws.ts",
-        "web/src/components/StorageBanner.tsx",
+        "web/src/store.ts",
+        "web/src/lib/machineHealth.ts",
+        "web/src/components/SyncIndicator.tsx",
         "web/src/components/SyncSection.tsx",
+        "web/src/components/ConnectionBanner.tsx",
         "desktop/src/main.ts"
       ],
       "symbols": [
@@ -1639,33 +1648,40 @@
         "Store.appendSyncLog",
         "Store.readSyncLog",
         "relayAuth",
-        "retryStorage"
+        "retryStorage",
+        "StorageStatus.cloud",
+        "StorageStatus.pending",
+        "SyncOutbox",
+        "StorageSyncClient.pending",
+        "syncIndicator"
       ],
       "tests": [
         "server/src/sync.availability.test.ts",
+        "server/src/sync.outbox.test.ts",
         "server/src/store.sync-log.test.ts"
       ],
       "businessRules": [
-        "a single auth (401/403) failure does not raise the banner; only AUTH_GRACE_MS (90s) of continuous auth failures does, and any 2xx/304 resets that clock",
-        "while down, a GET /settings probe fires every PROBE_INTERVAL_MS (15s) so recovery is reflected within seconds instead of waiting for the next incidental pull/push",
-        "the probe targets /settings, not /health, since /health sits above storage's Clerk gate and would falsely clear an auth-caused outage",
-        "sync-log.jsonl only grows on a failed request or an availability transition, capped at ~256 KB and trimmed to its newer half on overflow",
-        "a soft-error request still marks the link available and never touches the auth-grace clock, since a soft 401 is not evidence the token is good",
-        "a relayed token while down triggers an immediate probe (owner only), from either source: the in-channel auth handler calls ctx.sync.retryNow() after setting ctx.clerkToken, and the relay's onToken does the same",
-        "the banner's Dismiss is per-tab, keyed by the outage's status.since; a new outage shows again",
-        "only a refused signature verdict appends a fail row and warns; an accepted unsigned blob (mixed-fleet rollout) applies silently, no log row",
-        "desktop's main window runs with backgroundThrottling: false so the 50s token-relay timer isn't throttled while hidden"
+        "a single auth (401/403) failure does not change the cloud state; only AUTH_GRACE_MS (90s) of continuous auth failures does, and any 2xx/304 resets that clock",
+        "signedOut is reported for a missing token or a persisted auth failure, never for a plain outage",
+        "while down, a GET /settings probe fires every PROBE_INTERVAL_MS (15s)",
+        "no visible offline banner or modal on cloud-down; the header dot is grey and never red or amber",
+        "the local window's ConnectionBanner is the only banner here, and only when the loopback link to the bridge is lost",
+        "sync-log.jsonl only grows on a failed request or an availability transition, capped at ~256 KB and trimmed to its newer half",
+        "a soft-error request still marks the link available and never touches the auth-grace clock",
+        "a relayed token while down triggers an immediate probe (owner only)",
+        "only a refused signature verdict appends a fail row and warns"
       ],
       "architecturalRules": [
         "classifyStatus/classifyError are pure exported functions, unit-testable without constructing a client",
-        "appendLog is injected with the same shape and default (() => {}) as the existing persistMarks parameter, so sync.ts still imports no fs",
-        "the probe timer is unref()'d like every other StorageSyncClient timer, started only on the down transition and stopped only on the up transition",
+        "appendLog, persistOutbox, onRecovered and localSessions are injected so sync.ts imports no fs",
+        "the probe timer is unref()'d, started only on the down transition and stopped only on the up transition",
         "no storage-server change: no Prisma migration, no storage/ deploy coupling"
       ],
       "relatedDecisions": [
         "cloud-sync-sessions",
         "agent-memory-sync",
-        "file-routes-over-ws"
+        "file-routes-over-ws",
+        "desktop-app"
       ]
     },
     {
@@ -2500,7 +2516,6 @@
         "BRIDGE_LOCK_FILE",
         "EXIT_BRIDGE_LOCK_HELD",
         "resolveRelayIdentity",
-        "readRuntimeInfo",
         "socketGeneration",
         "ChooseMachine",
         "renameDevice",
@@ -2540,7 +2555,8 @@
         "COLLAB_MIN_PROTOCOL",
         "pendingPairCode",
         "takePairCodeFromUrl",
-        "relayLink"
+        "relayLink",
+        "connectionPolicy tokenGated mode"
       ],
       "tests": [
         "storage/src/schema.credentials.test.ts",
@@ -2810,7 +2826,8 @@
         "desktop/scripts/check-unreleased.mjs",
         ".github/workflows/release-desktop.yml",
         "desktop/package.json",
-        "desktop/scripts/stamp-changelog.mjs"
+        "desktop/scripts/stamp-changelog.mjs",
+        "web/src/lib/localShell.ts"
       ],
       "files": [
         "desktop/src/main.ts",
@@ -2938,7 +2955,8 @@
         "the app window's console is mirrored to the log as [renderer] — only [diag]/[ws]/[e2ee] lines plus warnings/errors — along with did-finish-load (URL without fragment), render-process-gone and unresponsive; observed from the main process, so the window keeps its no-preload/no-IPC contract",
         "the tray's Collect diagnostics… zips both log generations, run/*/*.json with token deleted, the bridge lock and a summary.json into ~/.lines-app/diagnostics via /usr/bin/ditto; device.json is never copied",
         "ship.mjs stamps desktopPending in changelog.json into a new desktop release when it commits a version bump, in the same commit; the release workflow's guard job fails if desktopPending is non-empty because CI cannot commit the stamp (see whats-new)",
-        "every launch (manual start, login item, update restart, relaunch) opens Lines per openIn: the app window, or the system browser when openIn=browser; while unpaired it carries the pairing code in the URL fragment (pair=<code>, or #pair= in the browser); the data-URL pairing window stays in the tray and opens if the app window fails to load"
+        "every launch (manual start, login item, update restart, relaunch) opens Lines per openIn: the app window, or the system browser when openIn=browser; while unpaired it carries the pairing code in the URL fragment (pair=<code>, or #pair= in the browser); the data-URL pairing window stays in the tray and opens if the app window fails to load",
+        "the local fallback window is off unless LINES_LOCAL_FALLBACK=1, and its shell never shows an error page for a cloud outage"
       ],
       "architecturalRules": [
         "context menu hooked inside attachNavigationGuards so every window, including popups, gets it without a preload",

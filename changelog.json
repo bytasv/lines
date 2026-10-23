@@ -1,6 +1,13 @@
 {
   "web": [
     {
+      "version": "0.1.31",
+      "date": "2026-10-23",
+      "items": [
+        "Cloud sync no longer shows a banner when it is down. A quiet dot in the header shows whether your changes are synced, how many are still waiting, and what they are. \"Sync now\" retries straight away, and waiting changes go out on their own once the cloud is back. Deletes made while offline stay deleted."
+      ]
+    },
+    {
       "version": "0.1.30",
       "date": "2026-10-23",
       "items": [

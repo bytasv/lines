@@ -16,7 +16,8 @@ None UI-facing — sync only. Fires on `syncNow` (websocket connect/reconnect) v
 
 - `shared/types.ts` — `SessionMeta.updatedAt`/`createdAt`, `SessionMeta.permissionCeiling` (local-only)
 - `server/src/store.ts` — `SyncWatermarks.sessionsPushed`, `loadDeletedSessions`/`saveDeletedSessions`
-- `server/src/sync.ts` — `StorageSyncClient.pushSessions`/`pushSession`/`flushSessions`/`chunkSessions`/`deleteSession`/`drainDeletes`; `sessionForSync` (strips local-only fields from what is sent)
+- `server/src/sync.ts` — `StorageSyncClient.pushSessions`/`pushSession`/`flushSessions`/`chunkSessions`/`deleteSession`/`drainDeletes`; the durable outbox (`SyncOutbox`, `settle`, dirty marks, `pending()`); `sessionForSync` (strips local-only fields from what is sent)
+- `server/src/store.ts` — `loadSyncOutbox`/`saveSyncOutbox` on `sync-outbox.json`
 - `server/src/sessions.ts` — `SessionManager.adoptSynced`/`adoptSyncedWorkflow`/`applyRemoteDelete`, the tombstone map
 - `server/src/workflows.ts` — `runStep`'s refusal of a session whose own workflow snapshot is marked (`unverifiedRefusal`)
 - `server/src/syncSignature.ts` — `runnableDigest`, which `adoptSyncedWorkflow` compares an embedded workflow by
@@ -27,23 +28,26 @@ None UI-facing — sync only. Fires on `syncNow` (websocket connect/reconnect) v
 
 ## Symbols
 
-- `StorageSyncClient.pushSessions` — filters a bulk list to metas newer than `marks.sessionsPushed`, drops any id with an unconfirmed delete, and drains `pendingDeletes` before queuing the rest
+- `StorageSyncClient.pushSessions` — filters a bulk list to metas newer than `marks.sessionsPushed`, drops any id with an unconfirmed delete, and drains pending deletes before queuing the rest
 - `StorageSyncClient.pushSession` — per-session queue + debounce timer, unfiltered (already a delta); skips an id whose delete is still pending
-- `StorageSyncClient.flushSessions` — sends the debounced batch as sequential chunks, re-filtering `pendingDeletes` per chunk (not just once up front); advances the watermark only if every chunk succeeded; drains deletes again afterward
+- `StorageSyncClient.flushSessions` — sends the debounced batch as sequential chunks, re-filtering pending deletes per chunk (not just once up front); advances the watermark only if every chunk succeeded; drains deletes again afterward
 - `StorageSyncClient.chunkSessions` — splits a batch into bodies under `SESSIONS_PUSH_MAX_BYTES`; drops (and warns on) a single meta that alone exceeds the budget
-- `StorageSyncClient.deleteSession` — queues the id in `pendingDeletes` immediately, then sends the `DELETE` right away if the client is enabled and not mid-`applying`; otherwise the id waits for the next `pushSessions`/`pushSession` call to retry it
-- `StorageSyncClient.drainDeletes` — retries every unconfirmed delete; storage's soft delete is idempotent, so a retry is free
+- `StorageSyncClient.deleteSession` — queues the id in the outbox immediately, then sends the `DELETE` right away if the client is enabled and not mid-`applying`; otherwise the id waits in the outbox until a flush retries it. `deleteWorkflow`, `deleteStep` and `deleteRecipe` follow the same pattern
+- `StorageSyncClient.isPendingDelete` — true while a delete of that kind and id is unconfirmed; the pull path skips such rows
+- `StorageSyncClient.pending` — per-kind counts of writes storage has not confirmed
+- `StorageSyncClient.drainDeletes` — retries every unconfirmed delete of every kind; storage's soft delete is idempotent, so a retry is free, and a 404 counts as already done
 - `SyncWatermarks.sessionsPushed` — newest pushed `SessionMeta.updatedAt`/`createdAt` accepted by storage
 - `SessionManager.adoptSynced` — LWW-adopts a pulled session, now returning early when a local tombstone's timestamp is not beaten by the pulled row (the branch the plain "no local copy" case never reached before); keeps `queued`, `permissionMode` and `permissionCeiling` at what this machine already had
 - `SessionManager.adoptSyncedWorkflow` — the part of a pulled `workflow` state that becomes prompt text here: keeps an embedded `def` only if it is the exact workflow this machine already holds for the session, otherwise keeps it for display with an `unsigned` mark; for the run this machine already holds, keeps its own `task`/`outputs`/`lastStepOutput`
 - `sessionForSync` (`server/src/sync.ts`) — the copy of a meta a push sends, without `permissionCeiling`; the live meta keeps it
 - `SessionManager.applyRemoteDelete(id, deletedAt)` — records a tombstone (keeping the newer of any existing one), tears down local state if present, and broadcasts `sessionDeleted` — even for a session this machine never held
 - `Store.loadDeletedSessions` / `saveDeletedSessions` — the bridge's own tombstone map, persisted beside `sessions.json` and pruned past ~30 days on load
+- `Store.loadSyncOutbox` / `saveSyncOutbox` — the outbox of unconfirmed deletes and dirty kinds, persisted as `sync-outbox.json`
 - `listSessions` / `putSessions` / `putSession` / `softDeleteSession` / `toWire` (`storage/src/sessionRows.ts`) — the row-level implementation the `/sessions` routes call through to
 
 ## Data flow
 
-`pushSessions(list)` compares each meta's `updatedAt` (falling back to `createdAt`) against `marks.sessionsPushed` and only queues the newer ones via `pushSession`, after first draining any pending deletes and dropping any id whose delete has not yet been confirmed. The shared debounce timer eventually calls `flushSessions`, which splits the queued batch into JSON bodies under `SESSIONS_PUSH_MAX_BYTES`, re-checks `pendingDeletes` **per chunk** (a delete issued while an earlier chunk was in flight must not be undone by a later one), and `PUT`s the survivors to `/sessions` one at a time, awaiting each before sending the next. If a chunk's request fails, its metas are merged back into `pendingSessions` (never overwriting a newer meta that arrived meanwhile) and the watermark is not advanced, so the next flush retries them. Once every chunk in a flush succeeds, `sessionsPushed` is set to the batch's newest timestamp and persisted via the existing `marksDirty`/`commitCursors()` path.
+`pushSessions(list)` compares each meta's `updatedAt` (falling back to `createdAt`) against `marks.sessionsPushed` and only queues the newer ones via `pushSession`, after first draining any pending deletes and dropping any id whose delete has not yet been confirmed. The shared debounce timer eventually calls `flushSessions`, which splits the queued batch into JSON bodies under `SESSIONS_PUSH_MAX_BYTES`, re-checks the pending deletes **per chunk** (a delete issued while an earlier chunk was in flight must not be undone by a later one), and `PUT`s the survivors to `/sessions` one at a time, awaiting each before sending the next. If a chunk's request fails, its metas are merged back into `pendingSessions` (never overwriting a newer meta that arrived meanwhile) and the watermark is not advanced, so the next flush retries them. Once every chunk in a flush succeeds, `sessionsPushed` is set to the batch's newest timestamp and persisted via the existing `marksDirty`/`commitCursors()` path.
 
 A cursor-less `/sessions` pull (no `marks.sessions` stored — a fresh or migrated install) also clears `sessionsPushed`, so the next bulk push against that storage server is treated as complete rather than assuming it already has rows it has never seen.
 
@@ -53,7 +57,7 @@ Storage-side, a body over the `express.json({ limit: '2mb' })` cap now answers `
 
 ### Delete: local
 
-`SessionManager.deleteSession` records a tombstone (`deletedAt = Date.now()`) alongside forgetting the session's live state, transcript and queue, then broadcasts `sessionDeleted` as before. `sync.ts`'s broadcast observer routes that into `StorageSyncClient.deleteSession`, which queues the id in `pendingDeletes` and, if the client is enabled and not mid-pull, fires the `DELETE` immediately. If it can't fire yet — no token, or `applying` — the id simply waits: every later `pushSessions`/`pushSession` call drains `pendingDeletes` first.
+`SessionManager.deleteSession` records a tombstone (`deletedAt = Date.now()`) alongside forgetting the session's live state, transcript and queue, then broadcasts `sessionDeleted` as before. `sync.ts`'s broadcast observer routes that into `StorageSyncClient.deleteSession`, which records the id in the outbox and, if the client is enabled and not mid-pull, fires the `DELETE` immediately. If it can't fire yet — no token, or `applying` — the id stays in the outbox and is retried by the next flush. Workflow, step and recipe deletes are queued the same way. The outbox is persisted, so a delete survives a restart during an outage.
 
 ### Delete: remote
 
@@ -85,7 +89,7 @@ A session row is never signed (see [end-to-end-encryption](end-to-end-encryption
 - Storage rows are LWW upserts; a session whose `updatedAt`/`createdAt` is not newer than the last accepted push is not re-sent in a bulk push.
 - A meta with neither `updatedAt` nor `createdAt` is always pushed (correct but not free).
 - A single session whose own JSON exceeds the push budget is dropped from the cloud push (with a one-time warning naming its id) rather than failing the whole batch; its local copy and UI are unaffected.
-- A rejected chunk's sessions are retried on the next flush, not dropped.
+- A rejected chunk's sessions are retried on the next flush, not dropped, and a failed flush re-arms its own timer with backoff (capped at 60s), so a retry does not wait for another local change.
 - A session delete is a **soft** delete in storage (`Session.deletedAt`), never a hard delete — a hard delete leaves peers nothing to adopt, so whichever machine still holds the row pushes it right back on its next sync.
 - `DELETE` is idempotent: a repeat keeps the original `deletedAt` stamp rather than advancing it.
 - `GET /sessions` serves tombstoned rows too, inside the normal delta window — filtering them out is exactly what breaks delete propagation.
@@ -97,8 +101,12 @@ A session row is never signed (see [end-to-end-encryption](end-to-end-encryption
 - `permissionCeiling` is never synced: stripped from every push (on the copy sent — the live meta keeps it) and ignored on pull, so a row can neither lift a ceiling a foreign recipe run set here nor bring one.
 - An embedded workflow (`workflow.def`) pulled from storage is display-only unless it is exactly the def this machine already holds for that session: otherwise it is marked and `runStep` refuses every step of it, whatever `LINES_E2EE_STRICT` says. For a run this machine holds, its own `task`/`outputs`/`lastStepOutput` stand over the row's.
 - The queue flush that follows `reconcileWithWorker` is scoped by the same `ranHere` rule as the demotion loop above it. Without that scope it ran over *every* session, adopted ones included — and a synced row supplies everything `maybeFlush` asks for (non-empty `queued`, unpaused queue, idle status), so a row written into Postgres started a turn on this machine, unattended, at the next worker hello. That was a live path, not a theoretical one; `sessions.reconcile.test.ts` covers it and the test was written before the fix.
-- A delete issued while pulled state is being applied, or before there's a token to send it with, is queued (`pendingDeletes`) rather than dropped, and rides the next flush/sync instead of being lost.
+- A delete issued while pulled state is being applied, or before there's a token to send it with, is recorded in the durable outbox rather than dropped, and rides the next flush/sync instead of being lost. The outbox is reloaded on restart.
+- A pulled row whose delete is still unconfirmed is skipped, so a pull cannot resurrect it.
+- Whole-blob pushes (workflows, steps, recipes, settings, guard allowlist, MCP connections, memory, project keys) mark their kind dirty when skipped or failed, and clear the mark only on a 2xx.
+- On recovery (down→up, or a token arriving while writes are pending), the client flushes everything at once, past the pull throttle: deletes first, then the pull, then the pushes.
 - A bulk push (reconnect) filters out any session whose delete is still unconfirmed, so the whole-list push can't undo a delete that raced it.
+- Storage refusal or outage never makes the local copy the loser: everything waits in the outbox and is re-sent when the link returns.
 - A guest connection (see [session-collaboration](session-collaboration.md)) never sets
   `ctx.clerkToken` and never calls `syncNow()` — every push above is keyed to the *host's*
   `UserContext`, and a guest's token reaching it would push the host's sessions to Postgres under
@@ -113,7 +121,7 @@ A session row is never signed (see [end-to-end-encryption](end-to-end-encryption
 - The row-level rules (LWW upsert, soft delete, resurrect guard, wire shape) live in `storage/src/sessionRows.ts` rather than inline in the `/sessions` routes, so they're unit-testable without a Clerk token — `/sessions` itself stays Clerk-gated and just calls through.
 - `SessionManager`'s sessions map and tombstone map are always written together (a single `writeState`), so they can never desync on disk.
 - `deleteSession` and `applyRemoteDelete` share a private `forget()` that only tears down live state that actually exists, so a remote tombstone for a session this machine never ran costs nothing.
-- `flushSessions` re-checks `pendingDeletes` per chunk rather than once before the loop, because the batch was captured before the first `await` and a delete can land in the gap between chunks.
+- `flushSessions` re-checks the pending deletes per chunk rather than once before the loop, because the batch was captured before the first `await` and a delete can land in the gap between chunks.
 
 ## Related decisions
 
