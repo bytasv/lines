@@ -201,6 +201,13 @@
   ],
   "desktop": [
     {
+      "version": "0.2.62",
+      "date": "2026-10-26",
+      "items": [
+        "Each project remembers its own sidebar sort order, new-session choice, worktree switch and sessions/files view, and syncs them across your machines."
+      ]
+    },
+    {
       "version": "0.2.61",
       "date": "2026-10-24",
       "items": [
@@ -327,7 +334,5 @@
       ]
     }
   ],
-  "desktopPending": [
-    "Each project remembers its own sidebar sort order, new-session choice, worktree switch and sessions/files view, and syncs them across your machines."
-  ]
+  "desktopPending": []
 }
