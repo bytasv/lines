@@ -209,6 +209,13 @@
   ],
   "desktop": [
     {
+      "version": "0.2.63",
+      "date": "2026-10-26",
+      "items": [
+        "People you share the whole machine with now see your session groups and manual order, and with full access can edit them. Nothing else from your settings is shared."
+      ]
+    },
+    {
       "version": "0.2.62",
       "date": "2026-10-26",
       "items": [
@@ -342,7 +349,5 @@
       ]
     }
   ],
-  "desktopPending": [
-    "People you share the whole machine with now see your session groups and manual order, and with full access can edit them. Nothing else from your settings is shared."
-  ]
+  "desktopPending": []
 }
