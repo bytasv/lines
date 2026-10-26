@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import type { ServerMessage, SessionMeta, SocketAccess, UsageSnapshot } from '@lines/shared';
-import { OWNER_ACCESS, capsForPreset } from '@lines/shared';
+import type { ServerMessage, SessionMeta, SocketAccess, UsageSnapshot, UserUiSettings } from '@lines/shared';
+import { OWNER_ACCESS, capsForPreset, sanitizeSessionLayout } from '@lines/shared';
 import { guestPayloadFor, guestUsage, mayReceive, sessionIdOf } from './userContext.ts';
 
 /**
@@ -110,10 +110,11 @@ describe('broadcast scope', () => {
     );
   });
 
-  test('a machine guest gets every session, the projects, the workflow library and plan usage, but no other account state', () => {
+  test('a machine guest gets every session, the projects, the workflow library, plan usage and the sidebar layout, but no other account state', () => {
     const machine: SocketAccess = { scope: 'machine', caps: capsForPreset('collaborator', 'machine') };
-    // Plan usage is sent cut down to `guestUsage` (see the tests below).
-    const allowed = new Set(['projects', 'projectKeys', 'workflows', 'usage', 'openaiUsage']);
+    // Plan usage is sent cut down to `guestUsage`, settings to the sidebar layout
+    // (see the tests below).
+    const allowed = new Set(['projects', 'projectKeys', 'workflows', 'usage', 'openaiUsage', 'settings']);
     for (const msg of SESSION_BEARING) assert.equal(mayReceiveMsg(msg, machine), true);
     for (const msg of ACCOUNT_WIDE) {
       assert.equal(mayReceiveMsg(msg, machine), allowed.has(msg.type), msg.type);
@@ -185,5 +186,50 @@ describe('guest plan usage', () => {
   test('other broadcasts reach a guest unchanged', () => {
     assert.equal(guestPayloadFor({ type: 'projects', projects: [] } as unknown as ServerMessage), undefined);
     assert.equal(guestPayloadFor({ type: 'sessionDeleted', sessionId: 's1' } as ServerMessage), undefined);
+  });
+});
+
+describe('guest sidebar layout', () => {
+  const settings: UserUiSettings = {
+    sessionGroups: { 'github.com/acme/app': [{ id: 'g1', name: 'For future', muted: true }] },
+    sessionOrder: { 'github.com/acme/app': ['s2', 's1'] },
+    alertSound: 'chime',
+    dismissedCheckouts: ['/Users/owner/private'],
+    smartRouting: { mode: 'auto', rules: {} },
+    updatedAt: 5,
+  };
+
+  test('a guest socket gets the groups and manual order, and nothing else from settings', () => {
+    const payload = JSON.parse(JSON.stringify(guestPayloadFor({ type: 'settings', settings } as ServerMessage)));
+    assert.deepEqual(payload, {
+      type: 'sessionLayout',
+      layout: { sessionGroups: settings.sessionGroups, sessionOrder: settings.sessionOrder },
+    });
+  });
+
+  test('settings with no layout still go out as an empty layout, never whole', () => {
+    const payload = guestPayloadFor({ type: 'settings', settings: { alertSound: 'chime' } } as ServerMessage);
+    assert.deepEqual(payload, { type: 'sessionLayout', layout: { sessionGroups: {}, sessionOrder: {} } });
+  });
+
+  test('a session guest gets no layout at all', () => {
+    assert.equal(mayReceiveMsg({ type: 'settings', settings } as ServerMessage, scoped(['s1'])), false);
+  });
+
+  test('sanitizeSessionLayout keeps only well-formed groups and ids, within the layout keys', () => {
+    const clean = sanitizeSessionLayout({
+      sessionGroups: {
+        p: [{ id: 'g1', name: 'A', muted: true, extra: 'x' }, { id: '', name: 'bad' }, { name: 'no id' }, 'junk'],
+        '': [{ id: 'g2', name: 'empty key' }],
+      },
+      sessionOrder: { p: ['s1', 2, '', 's2'] },
+      alertSound: 'hijack',
+    });
+    assert.deepEqual(clean, {
+      sessionGroups: { p: [{ id: 'g1', name: 'A', muted: true }] },
+      sessionOrder: { p: ['s1', 's2'] },
+    });
+    assert.deepEqual(sanitizeSessionLayout({ sessionGroups: 'nope' }), {});
+    assert.deepEqual(sanitizeSessionLayout(null), {});
   });
 });

@@ -1,6 +1,6 @@
 import { devRuntime } from './devRuntime.ts';
-import type { ServerMessage, SessionMeta, SocketAccess, UsageSnapshot, UserUiSettings } from '@lines/shared';
-import { allSessionGroups, findWorktree, isSessionMuted, projectRoots } from '@lines/shared';
+import type { ServerMessage, SessionLayout, SessionMeta, SocketAccess, UsageSnapshot, UserUiSettings } from '@lines/shared';
+import { allSessionGroups, findWorktree, isSessionMuted, projectRoots, sanitizeSessionLayout } from '@lines/shared';
 import { createStore, type Store } from './store.ts';
 import { AuthManager } from './auth.ts';
 import { OpenaiAuthManager } from './openaiAuth.ts';
@@ -185,7 +185,15 @@ export function mayReceive(
   ) {
     return true;
   }
+  // The owner's sidebar layout follows live for a machine guest; the rest of
+  // `settings` never leaves — `guestPayloadFor` cuts it down to the layout.
+  if (access.scope === 'machine' && msg.type === 'settings') return true;
   return msg.type === 'workerStatus' || msg.type === 'storageStatus' || msg.type === 'pong';
+}
+
+/** The owner's sidebar layout, the one slice of their settings a machine guest gets. */
+export function guestSessionLayout(settings: UserUiSettings | null | undefined): SessionLayout {
+  return sanitizeSessionLayout({ sessionGroups: settings?.sessionGroups ?? {}, sessionOrder: settings?.sessionOrder ?? {} });
 }
 
 /**
@@ -205,6 +213,8 @@ export function guestUsage(snapshot: UsageSnapshot | null): UsageSnapshot | null
  */
 export function guestPayloadFor(msg: ServerMessage): ServerMessage | undefined {
   if (msg.type === 'usage' || msg.type === 'openaiUsage') return { ...msg, usage: guestUsage(msg.usage) };
+  // Never undefined for `settings`: the caller would send the whole blob instead.
+  if (msg.type === 'settings') return { type: 'sessionLayout', layout: guestSessionLayout(msg.settings) };
   return undefined;
 }
 

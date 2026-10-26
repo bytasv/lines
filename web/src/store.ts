@@ -42,6 +42,7 @@ import type {
   SpendHistoryBlob,
   UsageSnapshot,
   SessionGroup,
+  SessionLayout,
   UserUiSettings,
   WorkerStatus,
   WorkflowDef,
@@ -630,6 +631,41 @@ export function selectSidebarMode(state: UiState): SidebarMode {
   return prefsFor(state, activeGroupKey(state)).sidebarMode;
 }
 
+const NO_LAYOUT_MAP = {};
+
+/**
+ * The sidebar layout of the machine in front of the user: the owner's (from
+ * `guestLayouts`) on a shared machine, this user's own settings otherwise.
+ */
+export function sidebarLayout(state: {
+  access: unknown;
+  primaryDeviceId: string | null;
+  guestLayouts: Record<string, SessionLayout>;
+  sessionGroups: Record<string, SessionGroup[]>;
+  sessionOrder: Record<string, string[]>;
+}): { sessionGroups: Record<string, SessionGroup[]>; sessionOrder: Record<string, string[]> } {
+  if (!state.access) return { sessionGroups: state.sessionGroups, sessionOrder: state.sessionOrder };
+  const layout = state.guestLayouts[state.primaryDeviceId ?? ''];
+  return {
+    sessionGroups: layout?.sessionGroups ?? NO_LAYOUT_MAP,
+    sessionOrder: layout?.sessionOrder ?? NO_LAYOUT_MAP,
+  };
+}
+
+/**
+ * Every group this browser knows of — its own and each shared machine's owner's —
+ * for the mute check. Group ids are UUIDs, so one flat list resolves any session.
+ */
+export function knownSessionGroups(state: {
+  sessionGroups: Record<string, SessionGroup[]>;
+  guestLayouts: Record<string, SessionLayout>;
+}): SessionGroup[] {
+  return [
+    ...allSessionGroups(state),
+    ...Object.values(state.guestLayouts).flatMap((layout) => allSessionGroups(layout)),
+  ];
+}
+
 function pickActive(projects: Project[], current: string | null): string | null {
   if (current && projects.some((p) => p.path === current)) return current;
   return projects[0]?.path ?? null;
@@ -1000,6 +1036,12 @@ interface UiState {
   sessionGroups: Record<string, SessionGroup[]>;
   /** Hand-placed session order per project, for the `manual` sort; synced through settings. */
   sessionOrder: Record<string, string[]>;
+  /**
+   * The owner's sidebar layout on each machine shared with this user, by device
+   * id — what `sidebarLayout` shows while one of them is the primary. Never
+   * mixed into `sessionGroups`/`sessionOrder`, which are this user's own.
+   */
+  guestLayouts: Record<string, SessionLayout>;
   /** Sidebar sort, new-session choice, worktree toggle and sidebar mode per project; read through `prefsFor`. */
   sessionPrefs: Record<string, ProjectSessionPrefs>;
   /** Project whose sessions are shown; new sessions run here. */
@@ -1541,7 +1583,27 @@ export const useStore = create<UiState>((set, get) => {
   };
 
   /** Replace one project's group list, cache it, and push the settings blob. */
+  /**
+   * Write one map of the primary machine's layout. On somebody else's machine
+   * that is the owner's layout, kept apart from ours and saved on their bridge
+   * (`saveSessionLayout`); on our own it is our settings, as for any preference.
+   */
+  const setGuestLayout = (patch: SessionLayout) => {
+    const s = get();
+    const id = s.primaryDeviceId ?? '';
+    set({ guestLayouts: { ...s.guestLayouts, [id]: { ...s.guestLayouts[id], ...patch } } });
+    sendToMachine(id, { type: 'saveSessionLayout', layout: patch });
+  };
+
   const setGroups = (groupKey: string, update: (groups: SessionGroup[]) => SessionGroup[]) => {
+    if (get().access) {
+      const sessionGroups = { ...sidebarLayout(get()).sessionGroups };
+      const next = update(sessionGroups[groupKey] ?? []);
+      if (next.length) sessionGroups[groupKey] = next;
+      else delete sessionGroups[groupKey];
+      setGuestLayout({ sessionGroups });
+      return;
+    }
     const sessionGroups = { ...get().sessionGroups };
     const next = update(sessionGroups[groupKey] ?? []);
     if (next.length) sessionGroups[groupKey] = next;
@@ -1585,6 +1647,7 @@ export const useStore = create<UiState>((set, get) => {
   dismissedCheckouts: loadDismissedCheckouts(),
   sessionGroups: loadKeyedMap<SessionGroup[]>(SESSION_GROUPS_KEY),
   sessionOrder: loadKeyedMap<string[]>(SESSION_ORDER_KEY),
+  guestLayouts: {},
   sessionPrefs: loadKeyedMap<ProjectSessionPrefs>(SESSION_PREFS_KEY),
   activeProject: localStorage.getItem(ACTIVE_PROJECT_KEY),
   seenSessionStatus: readSeenSessionStatus(),
@@ -2145,7 +2208,7 @@ export const useStore = create<UiState>((set, get) => {
     pushSettings();
   },
 
-  groupsFor: (groupKey) => get().sessionGroups[groupKey] ?? [],
+  groupsFor: (groupKey) => sidebarLayout(get()).sessionGroups[groupKey] ?? [],
 
   createGroup: (groupKey, name) => {
     const id = crypto.randomUUID();
@@ -2179,6 +2242,10 @@ export const useStore = create<UiState>((set, get) => {
   },
 
   setSessionOrder: (groupKey, ids) => {
+    if (get().access) {
+      setGuestLayout({ sessionOrder: { ...sidebarLayout(get()).sessionOrder, [groupKey]: ids } });
+      return;
+    }
     const sessionOrder = { ...get().sessionOrder, [groupKey]: ids };
     localStorage.setItem(SESSION_ORDER_KEY, JSON.stringify(sessionOrder));
     set({ sessionOrder });
@@ -2260,14 +2327,14 @@ export const useStore = create<UiState>((set, get) => {
         // or on its latest active session when that one is gone or archived.
         if (!inProject) {
           selected =
-            rememberedSessionIn(state.sessions, state.projectKeys, project, allSessionGroups(state))?.id ??
+            rememberedSessionIn(state.sessions, state.projectKeys, project, knownSessionGroups(state))?.id ??
             latestSessionIn(
               state.sessions,
               state.projectKeys,
               project,
-              allSessionGroups(state),
+              knownSessionGroups(state),
               prefsFor(state, groupKeyOf(state.projectKeys, project.path)).sort,
-              state.sessionOrder[groupKeyOf(state.projectKeys, project.path)],
+              sidebarLayout(state).sessionOrder[groupKeyOf(state.projectKeys, project.path)],
             )?.id ??
             null;
         }
@@ -2486,6 +2553,14 @@ export const useStore = create<UiState>((set, get) => {
         // own library with it.
         if (!msg.access) setBridgeOwnerId(msg.userId ?? null);
         if (msg.settings) applySettings(msg.settings);
+        // Somebody else's machine: its owner's sidebar layout, kept per machine.
+        // A session share sends none, and its list stays flat.
+        if (msg.access) {
+          const guestLayouts = { ...get().guestLayouts };
+          if (msg.sessionLayout) guestLayouts[from] = msg.sessionLayout;
+          else delete guestLayouts[from];
+          set({ guestLayouts });
+        }
         // Every owner hello, not just the first: `registerPush` is an idempotent
         // upsert, and this is how a newly linked machine — or one whose file was
         // lost — picks up this device's subscription.
@@ -2494,6 +2569,9 @@ export const useStore = create<UiState>((set, get) => {
       }
       case 'settings':
         applySettings(msg.settings);
+        break;
+      case 'sessionLayout':
+        set((state) => ({ guestLayouts: { ...state.guestLayouts, [from]: msg.layout } }));
         break;
       case 'smartRoutingAvailable':
         // Gated like the hello field: it describes the primary machine's key.
@@ -2648,7 +2726,7 @@ export const useStore = create<UiState>((set, get) => {
           enabled: get().alertsEnabled,
           sound: get().alertSound,
           selectedSessionId: get().selectedSessionId,
-          muted: isSessionMuted(msg.session, allSessionGroups(get())),
+          muted: isSessionMuted(msg.session, knownSessionGroups(get())),
           onClickNotification: () => get().openSessionFromAlert(msg.session.id),
         });
         break;

@@ -1254,14 +1254,24 @@
         "moveGroup",
         "toggleGroupMuted",
         "setSessionOrder",
-        "groupsFor"
+        "groupsFor",
+        "SessionLayout",
+        "sessionLayout",
+        "saveSessionLayout",
+        "sanitizeSessionLayout",
+        "guestSessionLayout",
+        "guestLayouts",
+        "sidebarLayout",
+        "knownSessionGroups"
       ],
       "tests": [
         "server/src/statusMeta.test.ts",
         "server/src/sessions.groups.test.ts",
         "server/src/pushNotifier.test.ts",
         "server/src/sync.sessions.test.ts",
-        "server/src/store.test.ts"
+        "server/src/store.test.ts",
+        "server/src/broadcastScope.test.ts",
+        "server/src/messageAuthz.test.ts"
       ],
       "businessRules": [
         "persisted text draft is the full MentionValue (text + ranges), not plain text, so restored pills/expansions stay intact",
@@ -1300,7 +1310,7 @@
         "session groups are per project, keyed by project key (path fallback); a groupId naming no group of its project reads as ungrouped and falls back to Active, so deleting a group needs no per-session cleanup",
         "archive keeps groupId; unarchive and prompt reactivation keep it too, so an unarchived session returns to its group",
         "muting a group skips chime, Web Push, project tab dot and machine needs-you count, and auto-select; sessions keep running, background work and turn recovery continue; mute is not archive",
-        "guests never receive settings and therefore never see or edit groups; setSessionGroup needs manageSessions",
+        "machine-scope guests see the owner's groups and manual order (the sessionLayout cut of settings, never the rest) and, with manageSessions, edit them via saveSessionLayout, sanitized by the bridge; session-scope guests get a flat list; collapse state is per browser for guests too; setSessionGroup needs manageSessions",
         "the old global lines.showArchived is migrated once into per-project collapsed state (archived id) and removed; collapse state stays per browser",
         "a same-section drag reorders only under the Manual sort; under an automatic sort it asks before switching, and Archived is never hand-ordered",
         "archived sessions in the sidebar render 20 at a time behind a 'Show N more' button instead of the full archived list, since the Archived section starts expanded and a long-lived project can accumulate hundreds of them"

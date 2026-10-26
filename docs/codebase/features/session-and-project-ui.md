@@ -504,9 +504,14 @@ and "auto-select needs `pendingCreate`" is the recommended follow-up.
 - Muting a group means: no notifications (chime and Web Push), no project tab dot, no machine
   "needs you" count, and never auto-selected. Sessions still run normally, and background work
   and turn recovery continue. The group's header keeps its muted icon; mute is not archive.
-- Only the owner can manage groups or move sessions between them: a guest does not receive
-  `settings`, and `setSessionGroup` needs `manageSessions`. Archived and read-only rows offer no
-  move.
+- Groups belong to the machine owner. A machine-scope guest sees them too: the bridge sends
+  them the `sessionLayout` cut of the owner's settings (groups and manual order only, never the
+  rest) in `hello` and in place of every `settings` broadcast, and the web store keeps it per
+  machine in `guestLayouts`, apart from the user's own (`sidebarLayout` picks one for the primary
+  machine). A guest with `manageSessions` edits that layout through `saveSessionLayout`, which the
+  bridge sanitizes (`sanitizeSessionLayout`) and writes into the owner's settings. Session-scope
+  guests get no layout and a flat list. Archived and read-only rows offer no move.
+- Collapse state is the browser's own, so a guest can collapse sections (Archived included) too.
 - Group create, rename, delete, reorder and mute are synced settings edits (last write wins on the
   whole settings blob). Concurrent edits from two browsers can lose one.
 - Dragging a session between sections archives, unarchives or regroups it; a same-section drag

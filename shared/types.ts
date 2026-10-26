@@ -2448,6 +2448,9 @@ export const MESSAGE_AUTHZ: Record<ClientMessage['type'], MessageAuthz> = {
   archiveSession: { needs: 'session', cap: 'manageSessions' },
   unarchiveSession: { needs: 'session', cap: 'manageSessions' },
   setSessionGroup: { needs: 'session', cap: 'manageSessions' },
+  // The sidebar's groups and manual order: part of the owner's settings, but the
+  // one part a machine guest who may manage sessions shares and edits with them.
+  saveSessionLayout: { needs: 'machine', cap: 'manageSessions' },
   completeSession: { needs: 'session', cap: 'manageSessions' },
   deleteSession: { needs: 'session', cap: 'deleteSessions' },
 
@@ -2665,6 +2668,8 @@ export type ClientMessage =
   | { type: 'archiveSession'; sessionId: string }
   | { type: 'unarchiveSession'; sessionId: string }
   | { type: 'setSessionGroup'; sessionId: string; groupId: string | null }
+  /** Replace the machine's sidebar layout (see `SessionLayout`); each field present replaces that map. */
+  | { type: 'saveSessionLayout'; layout: SessionLayout }
   | { type: 'completeSession'; sessionId: string }
   | { type: 'setModel'; sessionId: string; model: string }
   /**
@@ -3189,6 +3194,57 @@ export interface SessionGroup {
  * session's `groupId` resolves without first working out which project key its
  * cwd maps to — a work tree or extra root with no key still finds its group.
  */
+/**
+ * The sidebar's shape on a machine — groups and manual order — which a machine
+ * guest sees and may edit. A slice of `UserUiSettings`; nothing else in the
+ * owner's settings ever reaches a guest.
+ */
+export type SessionLayout = Pick<UserUiSettings, 'sessionGroups' | 'sessionOrder'>;
+
+/** Caps on a layout written by a client, owner or guest. */
+const LAYOUT_MAX_PROJECTS = 500;
+const LAYOUT_MAX_GROUPS = 100;
+const LAYOUT_MAX_NAME = 120;
+const LAYOUT_MAX_ORDER = 5000;
+const LAYOUT_MAX_ID = 200;
+
+/**
+ * The layout fields of `raw`, validated: only well-formed groups and id lists,
+ * within the caps above, and only the two layout keys. Undefined for a field
+ * that is absent or malformed, so a bad write can never clear what is stored.
+ */
+export function sanitizeSessionLayout(raw: unknown): SessionLayout {
+  const src = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
+  const out: SessionLayout = {};
+  const isId = (v: unknown): v is string => typeof v === 'string' && v.length > 0 && v.length <= LAYOUT_MAX_ID;
+  const entries = (v: unknown) =>
+    v && typeof v === 'object' && !Array.isArray(v) ? Object.entries(v).slice(0, LAYOUT_MAX_PROJECTS) : null;
+  const groups = entries(src.sessionGroups);
+  if (groups) {
+    out.sessionGroups = {};
+    for (const [key, list] of groups) {
+      if (!isId(key) || !Array.isArray(list)) continue;
+      out.sessionGroups[key] = list
+        .slice(0, LAYOUT_MAX_GROUPS)
+        .filter((g): g is SessionGroup => !!g && isId(g.id) && typeof g.name === 'string')
+        .map((g) => ({
+          id: g.id,
+          name: g.name.slice(0, LAYOUT_MAX_NAME),
+          ...(g.muted === true ? { muted: true } : {}),
+        }));
+    }
+  }
+  const order = entries(src.sessionOrder);
+  if (order) {
+    out.sessionOrder = {};
+    for (const [key, ids] of order) {
+      if (!isId(key) || !Array.isArray(ids)) continue;
+      out.sessionOrder[key] = ids.filter(isId).slice(0, LAYOUT_MAX_ORDER);
+    }
+  }
+  return out;
+}
+
 export function allSessionGroups(settings: Pick<UserUiSettings, 'sessionGroups'> | null | undefined): SessionGroup[] {
   return Object.values(settings?.sessionGroups ?? {}).flat();
 }
@@ -3950,6 +4006,8 @@ export type ServerMessage =
        *  up. Owner only, like `update`. */
       whisperModelDownload?: WhisperModelDownload;
       settings?: UserUiSettings | null;
+      /** Machine guests only: the owner's sidebar layout, in place of `settings`. */
+      sessionLayout?: SessionLayout | null;
       /** Whether this user has a TypeSafe key saved on this machine, so smart
        *  routing can run. Owner only; absent from a bridge older than this field. */
       smartRoutingAvailable?: boolean;
@@ -3994,6 +4052,8 @@ export type ServerMessage =
     }
   | { type: 'projectKeys'; projectKeys: ProjectKeyMap }
   | { type: 'settings'; settings: UserUiSettings }
+  /** A machine guest's cut of `settings`: the owner's sidebar layout only. */
+  | { type: 'sessionLayout'; layout: SessionLayout }
   /** `hello.smartRoutingAvailable` after a key is saved or removed. Account-wide,
    *  so owner only like `settings`. */
   | { type: 'smartRoutingAvailable'; available: boolean }

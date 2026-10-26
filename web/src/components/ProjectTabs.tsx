@@ -35,11 +35,11 @@ import {
 import { useEffect, useState, type CSSProperties } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import type { Project, WorktreeInfo } from '@lines/shared';
-import { allSessionGroups, projectRoots } from '@lines/shared';
+import { projectRoots } from '@lines/shared';
 import { ConfirmModal } from './ConfirmModal';
 import { WorktreeModal } from './WorktreeModal';
 import { projectStatusMeta } from '../lib/format';
-import { sessionsInProject, useStore } from '../store';
+import { knownSessionGroups, sessionsInProject, useStore } from '../store';
 import { useCanBrowseFolders, useIsGuest } from '../lib/can';
 import { useIsPhone } from '../lib/layout';
 import { sessionsOnMachine } from '../lib/machines';
@@ -84,6 +84,7 @@ function ProjectTab({
   const projectKeys = useStore((s) => s.projectKeys);
   const seen = useStore((s) => s.seenSessionStatus);
   const sessionGroups = useStore((s) => s.sessionGroups);
+  const guestLayouts = useStore((s) => s.guestLayouts);
   // "Add folder…" shells out to Finder on the host, so it exists only for a
   // browser on the host or the desktop shell's own window there. A remote
   // device widens a project from the typed path.
@@ -109,7 +110,7 @@ function ProjectTab({
         // No timer: a finish ageing out of the recent window clears on the next
         // store-driven render, and session traffic makes those frequent.
         Date.now(),
-        allSessionGroups({ sessionGroups }),
+        knownSessionGroups({ sessionGroups, guestLayouts }),
       );
   const worktrees = project.worktrees ?? [];
   // The label stays the primary's basename; the tooltip is where every root fits.

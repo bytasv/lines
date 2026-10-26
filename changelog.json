@@ -1,6 +1,14 @@
 {
   "web": [
     {
+      "version": "0.1.33",
+      "date": "2026-10-26",
+      "items": [
+        "On a machine shared with you as a whole, the sidebar now shows the owner's session groups and manual order, and with full access you can edit groups and drag sessions between them. Sidebar sections, Archived included, can be collapsed there too.",
+        "While you drag a session, an empty or collapsed group opens a \"Drop here\" zone, so a newly created group is easy to drop into. The per-row \"Move to group\" button is gone in favour of dragging."
+      ]
+    },
+    {
       "version": "0.1.32",
       "date": "2026-10-26",
       "items": [
@@ -334,5 +342,7 @@
       ]
     }
   ],
-  "desktopPending": []
+  "desktopPending": [
+    "People you share the whole machine with now see your session groups and manual order, and with full access can edit them. Nothing else from your settings is shared."
+  ]
 }

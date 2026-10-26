@@ -279,3 +279,12 @@ describe('a refreshed token on a guest link', () => {
     assert.equal(tokenRefreshAction({ owner: true, relayed: false }, false), 'ignore');
   });
 });
+
+describe('saveSessionLayout', () => {
+  test('a machine guest who may manage sessions can save the layout; view-only and session guests cannot', () => {
+    const save = { type: 'saveSessionLayout', layout: {} } as ClientMessage;
+    assert.equal(authorizeMessage(save, guest('full', { scope: 'machine' })).ok, true);
+    assert.equal(authorizeMessage(save, guest('view', { scope: 'machine' })).ok, false);
+    assert.equal(authorizeMessage(save, guest('full', { scope: 'session', sessionIds: ['s1'] })).ok, false);
+  });
+});

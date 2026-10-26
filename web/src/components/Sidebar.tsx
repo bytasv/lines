@@ -86,7 +86,16 @@ import { ConfirmModal } from './ConfirmModal';
 import { SingleRunModal } from './workflow/SingleRunModal';
 import { useIdentityResolver } from '../lib/identity';
 import type { SidebarMode, SidebarSearchScope } from '../store';
-import { activeGroupKey, groupKeyOf, prefsFor, projectAt, selectSidebarMode, sessionsInProject, useStore } from '../store';
+import {
+  activeGroupKey,
+  groupKeyOf,
+  prefsFor,
+  projectAt,
+  selectSidebarMode,
+  sessionsInProject,
+  sidebarLayout,
+  useStore,
+} from '../store';
 import { send } from '../ws';
 import { FileSearchResults, FlagToggle } from './FileSearchPanel';
 import { FileTree } from './FileTree';
@@ -970,40 +979,45 @@ export function Sidebar({
   const project = projectAt(projects, activeProject);
   const roots = project ? projectRoots(project) : [];
   const activeProjectKey = activeProject ? (projectKeys[activeProject] ?? null) : null;
-  // Groups are the owner's: a guest never receives settings, so their list stays flat.
-  const groupKey = activeProject && !access ? groupKeyOf(projectKeys, activeProject) : null;
-  const groups = useStore((s) => (groupKey ? s.sessionGroups[groupKey] : undefined)) ?? NO_GROUPS;
+  // Groups are the machine owner's. A machine guest shares them (and edits them
+  // with Full access); a session share has no project of its own, so stays flat.
+  const groupKey =
+    activeProject && (!access || access.scope === 'machine') ? groupKeyOf(projectKeys, activeProject) : null;
+  const groups = useStore((s) => (groupKey ? sidebarLayout(s).sessionGroups[groupKey] : undefined)) ?? NO_GROUPS;
   const createGroup = useStore((s) => s.createGroup);
   const moveGroup = useStore((s) => s.moveGroup);
-  const manualOrder = useStore((s) => (groupKey ? s.sessionOrder[groupKey] : undefined));
+  const manualOrder = useStore((s) => (groupKey ? sidebarLayout(s).sessionOrder[groupKey] : undefined));
   const setSessionOrder = useStore((s) => s.setSessionOrder);
   const compare = useMemo(() => compareSessions(sessionSort, manualOrder), [sessionSort, manualOrder]);
   const [namingGroup, setNamingGroup] = useState(false);
-  const collapsed = new Set(groupKey ? (collapsedGroups[groupKey] ?? []) : []);
+  // Collapse state is this browser's own, so a guest keeps one too (Archived at
+  // least), keyed the same way as the owner's groups.
+  const collapseKey = activeProject ? groupKeyOf(projectKeys, activeProject) : null;
+  const collapsed = new Set(collapseKey ? (collapsedGroups[collapseKey] ?? []) : []);
   const toggleCollapsed = (id: string) => {
-    if (!groupKey) return;
+    if (!collapseKey) return;
     setCollapsedGroups((all) => {
-      const cur = all[groupKey] ?? [];
+      const cur = all[collapseKey] ?? [];
       const next = cur.includes(id) ? cur.filter((g) => g !== id) : [...cur, id];
       const out = { ...all };
-      if (next.length) out[groupKey] = next;
-      else delete out[groupKey];
+      if (next.length) out[collapseKey] = next;
+      else delete out[collapseKey];
       return out;
     });
   };
   // The old global toggle: a hidden Archived carries over to the project open
   // when this first runs, then the key goes.
   useEffect(() => {
-    if (!groupKey) return;
+    if (!collapseKey) return;
     const legacy = localStorage.getItem(LEGACY_SHOW_ARCHIVED_KEY);
     if (legacy === null) return;
     localStorage.removeItem(LEGACY_SHOW_ARCHIVED_KEY);
     if (legacy !== 'false') return;
     setCollapsedGroups((all) => {
-      const cur = all[groupKey] ?? [];
-      return cur.includes(ARCHIVED_SECTION) ? all : { ...all, [groupKey]: [...cur, ARCHIVED_SECTION] };
+      const cur = all[collapseKey] ?? [];
+      return cur.includes(ARCHIVED_SECTION) ? all : { ...all, [collapseKey]: [...cur, ARCHIVED_SECTION] };
     });
-  }, [groupKey, setCollapsedGroups]);
+  }, [collapseKey, setCollapsedGroups]);
   /**
    * One machine's sessions, not every linked machine's.
    *

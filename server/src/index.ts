@@ -23,7 +23,7 @@ for (const envFile of [
   if (fs.existsSync(envFile)) dotenv.config({ path: envFile });
 }
 import { WebSocketServer, WebSocket } from 'ws';
-import type { Actor, ClientMessage, ServerMessage, SocketAccess } from '@lines/shared';
+import type { Actor, ClientMessage, ServerMessage, SocketAccess, UserUiSettings } from '@lines/shared';
 import { smartRoutingIssues } from './turnRouting.ts';
 import {
   APP_PROTOCOL_VERSION,
@@ -35,6 +35,7 @@ import {
   normalizeRootPath,
   capsForPreset,
   projectRoots,
+  sanitizeSessionLayout,
   SHARE_PRESETS,
 } from '@lines/shared';
 import { verifyToken } from '@clerk/backend';
@@ -64,7 +65,7 @@ import {
 } from './connectionPolicy.ts';
 import { APP_ROOT, isValidStoreId, userStoreRoot } from './store.ts';
 import { UserRegistry } from './userRegistry.ts';
-import { READ_ONLY_SESSION, guestUsage, type BrowserLink, type UserContext } from './userContext.ts';
+import { READ_ONLY_SESSION, guestSessionLayout, guestUsage, type BrowserLink, type UserContext } from './userContext.ts';
 import { handleFileRequest } from './fileRoutes.ts';
 import {
   clampPermissionMode,
@@ -1215,6 +1216,9 @@ function buildHello(
       // gets neither chip.
       usage: access.scope === 'machine' ? guestUsage(ctx.usage.snapshot) : null,
       openaiUsage: access.scope === 'machine' ? guestUsage(ctx.openaiUsage.snapshot) : null,
+      // The sidebar's groups and manual order, which a machine guest shares (and,
+      // with Full access, edits). Nothing else from the owner's settings.
+      sessionLayout: access.scope === 'machine' ? guestSessionLayout(ctx.store.loadSettings()) : null,
       // What the host has spent, on any day, is theirs alone.
       spendHistory: null,
       // The host's Claude account is theirs alone: a guest is told nothing about
@@ -1723,6 +1727,19 @@ async function handleMessageImpl(ctx: UserContext, ws: BrowserLink, msg: ClientM
     case 'setSessionGroup':
       sessions.setSessionGroup(msg.sessionId, typeof msg.groupId === 'string' ? msg.groupId : null);
       break;
+    case 'saveSessionLayout': {
+      // Owner or a machine guest with manageSessions (MESSAGE_AUTHZ). Only the two
+      // layout maps are taken, validated, and written into the owner's settings;
+      // every other field stays as stored.
+      const layout = sanitizeSessionLayout(msg.layout);
+      if (!layout.sessionGroups && !layout.sessionOrder) break;
+      const next: UserUiSettings = { ...(store.loadSettings() ?? {}), ...layout, updatedAt: Date.now() };
+      store.saveSettings(next);
+      ctx.sync.pushSettings(next);
+      // Owner tabs get the settings; guests get the layout cut (guestPayloadFor).
+      broadcast({ type: 'settings', settings: next });
+      break;
+    }
     case 'completeSession':
       sessions.completeSession(msg.sessionId);
       break;

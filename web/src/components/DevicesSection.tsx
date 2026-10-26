@@ -20,8 +20,7 @@ import {
   IconUserPlus,
   IconX,
 } from '@tabler/icons-react';
-import { allSessionGroups } from '@lines/shared';
-import { useStore } from '../store';
+import { knownSessionGroups, useStore } from '../store';
 import {
   claimDevice,
   forgetDeviceId,
@@ -97,10 +96,11 @@ export function DevicesSection() {
   // machine's total.
   const sessions = useStore((s) => s.sessions);
   const sessionGroups = useStore((s) => s.sessionGroups);
+  const guestLayouts = useStore((s) => s.guestLayouts);
   const guest = useIsGuest();
   const activity = guest
     ? { running: 0, actionable: 0 }
-    : machineActivity(Object.values(sessions), allSessionGroups({ sessionGroups }));
+    : machineActivity(Object.values(sessions), knownSessionGroups({ sessionGroups, guestLayouts }));
 
   useEffect(() => {
     void load();
