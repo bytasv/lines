@@ -3199,6 +3199,20 @@ export function isSessionMuted(meta: Pick<SessionMeta, 'groupId'>, groups: reado
   return groups.some((g) => g.id === meta.groupId && g.muted === true);
 }
 
+/** How the sidebar orders a session list. */
+export type SessionSort = 'status' | 'activity' | 'created' | 'manual';
+
+/** One project's sidebar session preferences; see `UserUiSettings.sessionPrefs`. */
+export interface ProjectSessionPrefs {
+  sort?: SessionSort;
+  /** What the "New session" button starts: '' = a plain session, else a workflow id. */
+  newSessionChoice?: string;
+  /** Start new sessions in their own git worktree. */
+  worktree?: boolean;
+  /** What the left sidebar shows: the session list or the project file tree. */
+  sidebarMode?: 'sessions' | 'files';
+}
+
 /** Per-user UI settings mirrored to the storage server; localStorage stays the offline cache. */
 export interface UserUiSettings {
   newSessionDefaults?: {
@@ -3207,6 +3221,7 @@ export interface UserUiSettings {
     /** Seed for a new session's `reasoningEffort`. Absent = provider default. */
     reasoningEffort?: ReasoningEffort;
   };
+  /** Legacy browser-wide sidebar mode: the fallback for a project with no `sessionPrefs.sidebarMode`. */
   sidebarMode?: 'sessions' | 'files';
   compactionLevel?: 'full' | 'grouped' | 'compact';
   turnSummariesEnabled?: boolean;
@@ -3269,6 +3284,12 @@ export interface UserUiSettings {
    * each section shows its members in this relative order. Archived is not placed.
    */
   sessionOrder?: Record<string, string[]>;
+  /**
+   * Per-project sidebar session preferences, keyed like `sessionGroups`. A
+   * project with no entry (or a missing field) falls back to the legacy
+   * browser-wide values, then the built-in defaults.
+   */
+  sessionPrefs?: Record<string, ProjectSessionPrefs>;
   /** Dictation language: `auto` or an ISO 639-1 code. Absent = `auto`. Per user,
    *  not per machine — a guest dictating into a host's session uses their own. */
   voiceLanguage?: string;

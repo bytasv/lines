@@ -47,10 +47,13 @@ and how status is surfaced in the sidebar row and the project tab.
   transcript/context-breakdown caches. An older relay replayed a channel's `open` (and with it, a
   fresh `hello`) on every bridge attach or takeover, so a browser that never itself reconnected
   could receive one; the guard stays for a relay that still does.
-- **Session list sorting** — a per-browser choice of sidebar session order: Status (default,
+- **Session list sorting** — a per-project choice of sidebar session order: Status (default,
   urgency-ranked), Last active, Created, or Manual. Applies to all sidebar sections. Auto-selection
-  (`latestSessionIn`) follows the same setting, so a launch lands on the row the sidebar shows first.
-  Manual uses a hand-placed order synced per project (see session groups).
+  (`latestSessionIn`) follows the selected project's setting, so a launch lands on the row the sidebar
+  shows first. Manual uses a hand-placed order synced per project (see session groups).
+- **Per-project session prefs** — the sort, the New-session choice (plain session or a workflow),
+  the worktree toggle and the Sessions/Files sidebar view are kept per project, so switching project
+  tabs restores that project's view. Synced through settings (see below).
 - **Session groups** — user-made, per-project sidebar sections (e.g. "For future") that park
   sessions without archiving them. Membership is `SessionMeta.groupId`; the group list, its order
   and mute flag are synced settings (`UserUiSettings.sessionGroups`). Sections run Shared-with-me
@@ -112,11 +115,15 @@ and how status is surfaced in the sidebar row and the project tab.
   effect keyed on `focusComposerFor`
 - `setActiveProject(path)` — single entry point for changing the active project; all three entry
   points above call it
-- `latestSessionIn(sessions, projectKeys, project, groups, order)` — top non-archived, unmuted
-  session in a project under the user's sidebar sort (`compareSessions(readSessionSort(), order)`),
-  or `undefined`
-- `readSessionSort()` — reads the sidebar's persisted sort from `SESSION_SORT_KEY` (`lib/format.ts`,
-  shared with `Sidebar.tsx`), validated, defaulting to `status`
+- `latestSessionIn(sessions, projectKeys, project, groups, sort, order)` — top non-archived, unmuted
+  session in a project under the sort passed in (`compareSessions(sort, order)`), or `undefined`;
+  `setActiveProject` passes the project's sort from `prefsFor`
+- `prefsFor(state, groupKey)` — one project's sidebar prefs fully resolved: its `sessionPrefs` entry,
+  else the legacy browser-wide value, else the default. Used by `Sidebar.tsx` and `latestSessionIn`
+- `activeGroupKey(state)` / `selectSidebarMode(state)` — the selected project's key, and the sidebar
+  view (Sessions or Files) read through `prefsFor`; `App.tsx` and `Sidebar.tsx` both use the selector
+- `readLegacyPref` / `LEGACY_PREFS` (`store.ts`) — the old global `lines.sessionSort`,
+  `lines.lastNewSessionChoice` and `lines.newSessionWorktree` values, read once at load as the fallback
 - `rememberedSessionIn(sessions, projectKeys, project, groups)` — the project's entry in
   `readLastSessions()`, resolved against current membership; `undefined` if the id is missing,
   archived, muted, or no longer in the project
@@ -185,6 +192,11 @@ and how status is surfaced in the sidebar row and the project tab.
 - `GroupNamePopover` — inline name field for create/rename
 - `lines.collapsedGroups` — localStorage `{ [groupKey]: collapsedIds[] }`, browser-only; replaces
   the old global `lines.showArchived`, which is migrated once and removed
+- `UserUiSettings.sessionPrefs` — `Record<projectKey, ProjectSessionPrefs>` (`shared/types.ts`), keyed
+  like `sessionGroups`; each entry holds `sort`, `newSessionChoice`, `worktree` and `sidebarMode`,
+  any of which may be absent. Mirrored to the `lines.sessionPrefs` localStorage cache. Written only by
+  `setSessionPrefs(groupKey, patch)`, which merges the patch and calls `pushSettings` (not for a guest)
+- `SessionSort` (`shared/types.ts`) — the sort union; `lib/format.ts` re-exports it
 - `withSeen(seen, ids)` — returns `seen` unchanged when every id is already present, so a no-op
   merge doesn't trigger a re-render
 - `pendingCreate` (store field) — true from `markSessionCreatePending()` until the matching
@@ -422,7 +434,7 @@ and "auto-select needs `pendingCreate`" is the recommended follow-up.
   the sidebar's Archived group or a deep link — is never overridden by a tab switch.
 - A project switch prefers the project's remembered last-selected session
   (`lines.lastSessionByProject`) over `latestSessionIn`; `latestSessionIn` — the top non-archived
-  session in the user's sidebar sort — remains the fallback when nothing
+  session in that project's sidebar sort — remains the fallback when nothing
   is remembered, the remembered session is gone, or it's now archived. Both also run on the primary
   machine's `hello` when nothing is selected.
 - The sidebar groups (Sessions, Shared-with-me, Archived), and the project tab's status dot
@@ -436,14 +448,22 @@ and "auto-select needs `pendingCreate`" is the recommended follow-up.
   checked against every tab, not just the active one) — not merely "outside the active tab". A
   session in another open project tab stays in that tab's Sessions list and never spills into
   Shared-with-me when you switch away from it.
-- The sidebar session list order is user-selectable via `lines.sessionSort` (persisted
-  `localStorage`), applied to all three groups (Sessions, Shared-with-me, Archived): **Status**
+- The sidebar session list order is chosen per project (`sessionPrefs[project].sort`, see
+  `prefsFor`), applied to all three groups (Sessions, Shared-with-me, Archived): **Status**
   (default) — running first, then the tab-dot urgency order (plan ready > needs answer > needs
   permission > interrupted > error), then background work, then step finished (a clean workflow
   park), then done, then idle,
   tie-broken by `lastActivityAt` descending; **Last active** — `lastActivityAt` descending;
   **Created** — `createdAt` descending (the sidebar's pre-existing, and still default-for-archived,
   behavior).
+- A project with no `sessionPrefs` entry, or a missing field, falls back to the legacy browser-wide
+  value, then the default (`status`, plain session, worktree off, sessions view). The legacy keys are
+  no longer written, so existing users see no change until they pick something for a project. A
+  project switch never copies one project's prefs to another.
+- The sidebar's New-session choice and worktree toggle are per project. A one-off create (`once`)
+  still leaves them unchanged.
+- A guest's prefs are local only: `setSessionPrefs` skips `pushSettings`, because the host refuses
+  `saveSettings` from a guest. Changes take effect in that browser alone.
 - A session status label missing from `SESSION_SORT_RANK` (a future `SessionStatus`) sorts last
   rather than being guessed at — the same rule `projectStatusMeta` applies by skipping.
 - The archived group's sort key changed from `archivedAt ?? createdAt` to the same `compareSessions`
@@ -553,6 +573,9 @@ and "auto-select needs `pendingCreate`" is the recommended follow-up.
   identity when unchanged, which `sessionUpsert` already guarantees by only replacing the entry
   that changed. See [transcript-performance](transcript-performance.md) for the other half of
   "switching sessions feels slow."
+- Per-project session prefs reuse the settings sync path (`sessionPrefs`) as a keyed map, like
+  `sessionGroups`, and fall back to the old global keys rather than migrating them. A `sessionPrefs`
+  write replaces the whole settings blob, so concurrent edits from two browsers can lose one.
 - Session groups reuse the settings sync path (`sessionGroups`, `sessionOrder`) and keep membership
   on `SessionMeta.groupId`, so no store, route or migration was added. Group ids are UUIDs, so a
   muted lookup can flatten every project's groups without resolving the session's project key.

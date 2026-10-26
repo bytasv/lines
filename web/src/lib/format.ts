@@ -1,5 +1,5 @@
 import { isSessionActive, isSessionMuted, resolveStepContent } from '@lines/shared';
-import type { SessionGroup, SessionMeta, SessionStatus, StepContent, WorkflowDef } from '@lines/shared';
+import type { SessionGroup, SessionMeta, SessionSort, SessionStatus, StepContent, WorkflowDef } from '@lines/shared';
 
 const STATUS_META: Record<SessionStatus, { color: string; label: string }> = {
   idle: { color: 'gray', label: 'idle' },
@@ -181,10 +181,9 @@ export function tracksSeen(meta: { label: string; actionable: boolean }): boolea
   return meta.actionable || PROJECT_RECENT_LABELS.has(meta.label);
 }
 
-/** How the sidebar orders a session list — persisted per browser. */
-export type SessionSort = 'status' | 'activity' | 'created' | 'manual';
+export type { SessionSort };
 
-/** localStorage key the sidebar's sort persists under; the store reads it too. */
+/** Legacy browser-wide sort key: read only, as the fallback for a project with no `sessionPrefs` entry. */
 export const SESSION_SORT_KEY = 'lines.sessionSort';
 
 /**

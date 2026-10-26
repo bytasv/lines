@@ -226,6 +226,16 @@ test('settings keep sidebar session groups, order and mute included', () => {
   assert.deepEqual(store.loadSettings()?.sessionGroups, sessionGroups);
 });
 
+test('settings keep per-project sidebar session prefs', () => {
+  const { store } = tmpStore();
+  const sessionPrefs = {
+    'github.com/acme/app': { sort: 'created' as const, newSessionChoice: 'wf-1', worktree: true },
+    '/tmp/plain': { sort: 'manual' as const, sidebarMode: 'files' as const },
+  };
+  store.saveSettings({ sessionPrefs, updatedAt: 5 });
+  assert.deepEqual(store.loadSettings()?.sessionPrefs, sessionPrefs);
+});
+
 test('the TypeSafe key stays out of every other store file', () => {
   const { root, store } = tmpStore();
   store.saveSettings({ smartRouting: { mode: 'auto', rules: {} } } as never);

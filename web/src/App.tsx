@@ -3,7 +3,7 @@ import { Route, Routes, useNavigate, useParams } from 'react-router-dom';
 import { AppShell, Box, Burger, Center, Loader, Stack, Text, Title } from '@mantine/core';
 import { useDisclosure } from '@mantine/hooks';
 import { IconMessageChatbot } from '@tabler/icons-react';
-import { useStore } from './store';
+import { selectSidebarMode, useStore } from './store';
 import { inProject } from './lib/machines';
 import { Sidebar } from './components/Sidebar';
 import { SessionView } from './components/SessionView';
@@ -114,7 +114,7 @@ function Shell() {
   const activeProject = useStore((s) => s.activeProject);
   const projectKeys = useStore((s) => s.projectKeys);
   const setActiveProject = useStore((s) => s.setActiveProject);
-  const sidebarMode = useStore((s) => s.sidebarMode);
+  const sidebarMode = useStore(selectSidebarMode);
   const hasSearchPreview = useStore((s) => s.searchPreview !== null);
   const [workflowEditorOpen, setWorkflowEditorOpen] = useState(false);
   // Which library the modal lands on — the sidebar has an entry point per library.

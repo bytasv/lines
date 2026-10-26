@@ -1,6 +1,13 @@
 {
   "web": [
     {
+      "version": "0.1.32",
+      "date": "2026-10-26",
+      "items": [
+        "Each project remembers its own sidebar choices: the sort order, whether the New session button starts a plain session or a workflow, the worktree switch, and whether the sidebar shows sessions or files. Switching projects brings back that project's settings, and they sync across your browsers."
+      ]
+    },
+    {
       "version": "0.1.31",
       "date": "2026-10-23",
       "items": [
@@ -320,5 +327,7 @@
       ]
     }
   ],
-  "desktopPending": []
+  "desktopPending": [
+    "Each project remembers its own sidebar sort order, new-session choice, worktree switch and sessions/files view, and syncs them across your machines."
+  ]
 }

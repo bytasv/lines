@@ -60,6 +60,7 @@ import {
 } from '@hello-pangea/dnd';
 import type {
   PermissionMode,
+  ProjectSessionPrefs,
   ReasoningEffort,
   SessionGroup,
   SessionMeta,
@@ -73,7 +74,6 @@ import {
   formatDuration,
   formatSpendUsd,
   isWorkflowFinished,
-  SESSION_SORT_KEY,
   sessionRowMeta,
   withLiveSpend,
 } from '../lib/format';
@@ -86,7 +86,7 @@ import { ConfirmModal } from './ConfirmModal';
 import { SingleRunModal } from './workflow/SingleRunModal';
 import { useIdentityResolver } from '../lib/identity';
 import type { SidebarMode, SidebarSearchScope } from '../store';
-import { groupKeyOf, projectAt, sessionsInProject, useStore } from '../store';
+import { activeGroupKey, groupKeyOf, prefsFor, projectAt, selectSidebarMode, sessionsInProject, useStore } from '../store';
 import { send } from '../ws';
 import { FileSearchResults, FlagToggle } from './FileSearchPanel';
 import { FileTree } from './FileTree';
@@ -901,11 +901,24 @@ export function Sidebar({
     defaultValue: {},
   });
   const [archivedShown, setArchivedShown] = useState(ARCHIVED_PAGE);
+  /**
+   * Sort, new-session choice and worktree toggle follow the selected project.
+   * Keyed by `activeGroupKey`, not `groupKey` below: that one is null for a
+   * guest, whose prefs still apply — they just stay in this browser.
+   */
+  const prefsKey = useStore(activeGroupKey);
+  const sessionPrefs = useStore((s) => s.sessionPrefs);
+  const legacySidebarMode = useStore((s) => s.sidebarMode);
+  const setSessionPrefs = useStore((s) => s.setSessionPrefs);
+  const prefs = useMemo(
+    () => prefsFor({ sessionPrefs, sidebarMode: legacySidebarMode }, prefsKey),
+    [sessionPrefs, legacySidebarMode, prefsKey],
+  );
+  const setPrefs = (patch: ProjectSessionPrefs) => {
+    if (prefsKey) setSessionPrefs(prefsKey, patch);
+  };
   // '' = raw session, otherwise workflow id.
-  const [lastChoice, setLastChoice] = useLocalStorage<string>({
-    key: 'lines.lastNewSessionChoice',
-    defaultValue: '',
-  });
+  const lastChoice = prefs.newSessionChoice;
   /**
    * On a shared machine `workflows` is the host's library, and the user's own
    * comes from their own machine's slice (when one is loaded). A workflow picked
@@ -941,16 +954,10 @@ export function Sidebar({
   };
   // Persisted like `lastChoice`: running every new session in its own checkout is a
   // working habit, not a per-click decision.
-  const [worktreeMode, setWorktreeMode] = useLocalStorage<boolean>({
-    key: 'lines.newSessionWorktree',
-    defaultValue: false,
-  });
-  // Persisted like the toggles above. Defaults to urgency order: the session that
-  // needs the user must not sit below newer idle ones in a busy project.
-  const [sessionSort, setSessionSort] = useLocalStorage<SessionSort>({
-    key: SESSION_SORT_KEY,
-    defaultValue: 'status',
-  });
+  const worktreeMode = prefs.worktree;
+  // Defaults to urgency order: the session that needs the user must not sit
+  // below newer idle ones in a busy project.
+  const sessionSort = prefs.sort;
 
   // A project switch starts the archived list over: the point of the cap is that
   // the first paint of a tab is cheap.
@@ -1121,7 +1128,7 @@ export function Sidebar({
       // Empty object = let the server name the branch and the path.
       ...(worktree ? { worktree: {} } : {}),
     });
-    if (!opts?.once) setLastChoice(workflowId ?? '');
+    if (!opts?.once) setPrefs({ newSessionChoice: workflowId ?? '' });
     // On a phone the drawer sits over the composer the user is about to type in.
     onNavigate?.();
   };
@@ -1178,7 +1185,7 @@ export function Sidebar({
     return () => observer.disconnect();
   }, [createRow]);
 
-  const sidebarMode = useStore((s) => s.sidebarMode);
+  const sidebarMode = useStore(selectSidebarMode);
   const setSidebarMode = useStore((s) => s.setSidebarMode);
   const openFileTab = useStore((s) => s.openFileTab);
   // The same flag the Cmd+P palette reads, so one toggle governs both views.
@@ -1417,7 +1424,7 @@ export function Sidebar({
                 {SORT_OPTIONS.map((opt) => (
                   <Menu.Item
                     key={opt.value}
-                    onClick={() => setSessionSort(opt.value)}
+                    onClick={() => setPrefs({ sort: opt.value })}
                     rightSection={
                       sessionSort === opt.value ? <IconCircleCheck size={14} /> : undefined
                     }
@@ -1649,7 +1656,7 @@ export function Sidebar({
                     label="Run in a new worktree"
                     description="Work is committed to a separate branch"
                     checked={worktreeMode}
-                    onChange={(e) => setWorktreeMode(e.currentTarget.checked)}
+                    onChange={(e) => setPrefs({ worktree: e.currentTarget.checked })}
                     styles={{
                       body: {
                         width: '100%',
@@ -1947,7 +1954,7 @@ export function Sidebar({
                 if (!drop?.destination) return;
                 // Placed against the rows as sorted now, before the sort flips.
                 placeSession(drop.draggableId, drop.destination.droppableId, drop.destination.index);
-                setSessionSort('manual');
+                setPrefs({ sort: 'manual' });
               }}
               onCancel={() => setPendingReorder(null)}
             />

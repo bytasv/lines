@@ -16,6 +16,7 @@ import type {
   PlanComment,
   Project,
   ProjectKeyMap,
+  ProjectSessionPrefs,
   PromptAttachment,
   PresenceViewer,
   PromptMention,
@@ -127,6 +128,10 @@ const SMART_ROUTING_KEY = 'lines.smartRouting';
 const DISMISSED_CHECKOUTS_KEY = 'lines.dismissedCheckouts';
 const SESSION_GROUPS_KEY = 'lines.sessionGroups';
 const SESSION_ORDER_KEY = 'lines.sessionOrder';
+const SESSION_PREFS_KEY = 'lines.sessionPrefs';
+/** Legacy browser-wide new-session prefs, read only as `prefsFor`'s fallback. */
+const LEGACY_NEW_SESSION_CHOICE_KEY = 'lines.lastNewSessionChoice';
+const LEGACY_NEW_SESSION_WORKTREE_KEY = 'lines.newSessionWorktree';
 const VOICE_LANGUAGE_KEY = 'lines.voiceLanguage';
 const VOICE_TRANSLATE_KEY = 'lines.voiceTranslate';
 const DRAFTS_KEY = 'lines.drafts';
@@ -273,17 +278,55 @@ function readLastSessions(): Record<string, string> {
   }
 }
 
-/**
- * The sidebar's session sort, read from where its `useLocalStorage` keeps it
- * (a JSON string), so auto-selection lands on the row the sidebar shows first.
- */
-function readSessionSort(): SessionSort {
+/** A legacy browser-wide sidebar pref, JSON-encoded as `useLocalStorage` kept it. */
+function readLegacyPref(key: string): unknown {
   try {
-    const raw = JSON.parse(localStorage.getItem(SESSION_SORT_KEY) ?? 'null') as unknown;
-    return raw === 'status' || raw === 'activity' || raw === 'created' || raw === 'manual' ? raw : 'status';
+    return JSON.parse(localStorage.getItem(key) ?? 'null') as unknown;
   } catch {
-    return 'status';
+    return null;
   }
+}
+
+/**
+ * Read once: these keys are never written any more, so the snapshot stays exact
+ * and `prefsFor` can run inside store selectors without touching localStorage.
+ */
+const LEGACY_PREFS = {
+  sort: readLegacyPref(SESSION_SORT_KEY),
+  newSessionChoice: readLegacyPref(LEGACY_NEW_SESSION_CHOICE_KEY),
+  worktree: readLegacyPref(LEGACY_NEW_SESSION_WORKTREE_KEY),
+};
+
+function isSessionSort(v: unknown): v is SessionSort {
+  return v === 'status' || v === 'activity' || v === 'created' || v === 'manual';
+}
+
+/**
+ * One project's sidebar session prefs with every field resolved: its own
+ * `sessionPrefs` entry, else the legacy browser-wide value, else the default.
+ * An invalid stored sort reads as `status`. The legacy values are no longer set
+ * while a project is active, so a user sees no change until they pick
+ * something per project. The legacy sidebar mode is the synced `sidebarMode`
+ * setting, so it comes from state rather than the snapshot.
+ */
+export function prefsFor(
+  state: Pick<UiState, 'sessionPrefs' | 'sidebarMode'>,
+  groupKey: string | null,
+): Required<ProjectSessionPrefs> {
+  const own = groupKey ? state.sessionPrefs[groupKey] : undefined;
+  const { sort: legacySort, newSessionChoice: legacyChoice, worktree: legacyWorktree } = LEGACY_PREFS;
+  return {
+    sidebarMode: own?.sidebarMode === 'files' || own?.sidebarMode === 'sessions' ? own.sidebarMode : state.sidebarMode,
+    sort: isSessionSort(own?.sort) ? own.sort : isSessionSort(legacySort) ? legacySort : 'status',
+    newSessionChoice:
+      typeof own?.newSessionChoice === 'string'
+        ? own.newSessionChoice
+        : typeof legacyChoice === 'string'
+          ? legacyChoice
+          : '',
+    worktree:
+      typeof own?.worktree === 'boolean' ? own.worktree : typeof legacyWorktree === 'boolean' ? legacyWorktree : false,
+  };
 }
 
 /** The persisted `seenSessionStatus` map, so a reload does not re-light every tab. */
@@ -577,6 +620,16 @@ export function groupKeyOf(projectKeys: ProjectKeyMap, projectPath: string): str
   return projectKeys[projectPath] ?? projectPath;
 }
 
+/** The selected project's `groupKeyOf`, or null with no project open. */
+export function activeGroupKey(state: Pick<UiState, 'activeProject' | 'projectKeys'>): string | null {
+  return state.activeProject ? groupKeyOf(state.projectKeys, state.activeProject) : null;
+}
+
+/** What the left sidebar shows for the selected project (see `prefsFor`). */
+export function selectSidebarMode(state: UiState): SidebarMode {
+  return prefsFor(state, activeGroupKey(state)).sidebarMode;
+}
+
 function pickActive(projects: Project[], current: string | null): string | null {
   if (current && projects.some((p) => p.path === current)) return current;
   return projects[0]?.path ?? null;
@@ -785,12 +838,14 @@ function latestSessionIn(
   projectKeys: ProjectKeyMap,
   project: Project,
   groups: SessionGroup[],
+  /** The project's sidebar sort (see `prefsFor`). */
+  sort: SessionSort,
   /** The project's manual order, read only when that is the sort. */
   order?: string[],
 ): SessionMeta | undefined {
   return sessionsInProject(sessions, projectKeys, project)
     .filter((s) => !s.archived && !isSessionMuted(s, groups))
-    .sort(compareSessions(readSessionSort(), order))[0];
+    .sort(compareSessions(sort, order))[0];
 }
 
 /**
@@ -945,6 +1000,8 @@ interface UiState {
   sessionGroups: Record<string, SessionGroup[]>;
   /** Hand-placed session order per project, for the `manual` sort; synced through settings. */
   sessionOrder: Record<string, string[]>;
+  /** Sidebar sort, new-session choice, worktree toggle and sidebar mode per project; read through `prefsFor`. */
+  sessionPrefs: Record<string, ProjectSessionPrefs>;
   /** Project whose sessions are shown; new sessions run here. */
   activeProject: string | null;
   /** Actionable session states the user has already looked at; see reconcileSeenStatus. */
@@ -1114,7 +1171,10 @@ interface UiState {
     string,
     { pending?: boolean; authUrl?: string; alreadyAuthorized?: boolean; error?: string; ok?: boolean }
   >;
-  /** What the left sidebar shows: session list or project file tree. */
+  /**
+   * Legacy browser-wide sidebar mode, still synced: the fallback for a project
+   * with no `sessionPrefs` entry. Read the current one with `selectSidebarMode`.
+   */
   sidebarMode: SidebarMode;
   sidebarSearch: SidebarSearchState | null;
   fileSearch: FileSearchState;
@@ -1221,6 +1281,8 @@ interface UiState {
   toggleGroupMuted: (groupKey: string, groupId: string) => void;
   /** Replace the project's manual order (session ids, first on top). */
   setSessionOrder: (groupKey: string, ids: string[]) => void;
+  /** Merge into one project's session prefs. Synced through settings, except for a guest. */
+  setSessionPrefs: (groupKey: string, patch: ProjectSessionPrefs) => void;
   setAlertsEnabled: (on: boolean) => Promise<void>;
   setAlertSound: (sound: AlertSound) => void;
   testAlertSound: () => void;
@@ -1341,6 +1403,7 @@ export const useStore = create<UiState>((set, get) => {
         dismissedCheckouts: s.dismissedCheckouts,
         sessionGroups: s.sessionGroups,
         sessionOrder: s.sessionOrder,
+        sessionPrefs: s.sessionPrefs,
         updatedAt: Date.now(),
       },
     });
@@ -1452,6 +1515,7 @@ export const useStore = create<UiState>((set, get) => {
       dismissedCheckouts: s.dismissedCheckouts ?? state.dismissedCheckouts,
       sessionGroups: s.sessionGroups ?? state.sessionGroups,
       sessionOrder: s.sessionOrder ?? state.sessionOrder,
+      sessionPrefs: s.sessionPrefs ?? state.sessionPrefs,
     }));
     // Keep the offline caches current so a cold start matches the server.
     if (s.newSessionDefaults) localStorage.setItem(NEW_SESSION_DEFAULTS_KEY, JSON.stringify(s.newSessionDefaults));
@@ -1473,6 +1537,7 @@ export const useStore = create<UiState>((set, get) => {
     }
     if (s.sessionGroups) localStorage.setItem(SESSION_GROUPS_KEY, JSON.stringify(s.sessionGroups));
     if (s.sessionOrder) localStorage.setItem(SESSION_ORDER_KEY, JSON.stringify(s.sessionOrder));
+    if (s.sessionPrefs) localStorage.setItem(SESSION_PREFS_KEY, JSON.stringify(s.sessionPrefs));
   };
 
   /** Replace one project's group list, cache it, and push the settings blob. */
@@ -1520,6 +1585,7 @@ export const useStore = create<UiState>((set, get) => {
   dismissedCheckouts: loadDismissedCheckouts(),
   sessionGroups: loadKeyedMap<SessionGroup[]>(SESSION_GROUPS_KEY),
   sessionOrder: loadKeyedMap<string[]>(SESSION_ORDER_KEY),
+  sessionPrefs: loadKeyedMap<ProjectSessionPrefs>(SESSION_PREFS_KEY),
   activeProject: localStorage.getItem(ACTIVE_PROJECT_KEY),
   seenSessionStatus: readSeenSessionStatus(),
   transcripts: {},
@@ -1853,13 +1919,19 @@ export const useStore = create<UiState>((set, get) => {
     }),
 
   setSidebarMode: (mode) => {
+    const key = activeGroupKey(get());
+    if (key) {
+      get().setSessionPrefs(key, { sidebarMode: mode });
+      return;
+    }
+    // No project open: nothing to key it by, so the browser-wide value it falls back to.
     localStorage.setItem(SIDEBAR_MODE_KEY, mode);
     set({ sidebarMode: mode });
     pushSettings();
   },
   openSidebarSearch: (scope) => {
     // The search lives over the session list; the file tree has no room for it.
-    if (get().sidebarMode !== 'sessions') get().setSidebarMode('sessions');
+    if (selectSidebarMode(get()) !== 'sessions') get().setSidebarMode('sessions');
     get().setSidebarSearch(scope ? { scope } : {});
     set((state) => ({ searchFocus: state.searchFocus + 1 }));
   },
@@ -2113,6 +2185,16 @@ export const useStore = create<UiState>((set, get) => {
     pushSettings();
   },
 
+  setSessionPrefs: (groupKey, patch) => {
+    const state = get();
+    const sessionPrefs = { ...state.sessionPrefs, [groupKey]: { ...state.sessionPrefs[groupKey], ...patch } };
+    localStorage.setItem(SESSION_PREFS_KEY, JSON.stringify(sessionPrefs));
+    set({ sessionPrefs });
+    // A guest's primary link is the host, which refuses `saveSettings` (owner
+    // only) — and the blob is the host's anyway. Theirs stay in this browser.
+    if (!state.access) pushSettings();
+  },
+
   setCheckoutDismissed: (cwd, dismissed) => {
     const next = get().dismissedCheckouts.filter((p) => p !== cwd);
     if (dismissed) next.push(cwd);
@@ -2184,6 +2266,7 @@ export const useStore = create<UiState>((set, get) => {
               state.projectKeys,
               project,
               allSessionGroups(state),
+              prefsFor(state, groupKeyOf(state.projectKeys, project.path)).sort,
               state.sessionOrder[groupKeyOf(state.projectKeys, project.path)],
             )?.id ??
             null;
