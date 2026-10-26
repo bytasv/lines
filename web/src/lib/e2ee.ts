@@ -315,7 +315,7 @@ function readGuestGrants(): GuestGrants {
   }
 }
 
-interface PendingJoinGrant {
+export interface PendingJoinGrant {
   /** The invite it came with, so a stash from one link is never spent on another. */
   code: string;
   /** The machine it is for, as the owner's link named it. */
@@ -351,13 +351,9 @@ function readPendingJoinGrant(): PendingJoinGrant | null {
  */
 export function takeJoinGrantFromUrl(code: string): void {
   const hash = new URLSearchParams(window.location.hash.replace(/^#/, ''));
-  const token = hash.get('grant');
-  const bridgeKey = hash.get('key');
-  const device = hash.get('device');
-  if (!token && !bridgeKey && !device) return;
-  if (token && bridgeKey && device) {
-    sessionStorage.setItem(PENDING_JOIN_GRANT_KEY, JSON.stringify({ code, device, token, bridgeKey } satisfies PendingJoinGrant));
-  }
+  const grant = readGrantFragment(hash);
+  if (!hash.get('grant') && !hash.get('key') && !hash.get('device')) return;
+  if (grant) stashJoinGrant({ code, ...grant });
   hash.delete('grant');
   hash.delete('key');
   hash.delete('device');
@@ -367,6 +363,48 @@ export function takeJoinGrantFromUrl(code: string): void {
     '',
     `${window.location.pathname}${window.location.search}${rest ? `#${rest}` : ''}`,
   );
+}
+
+/** The grant half of an invite link's fragment, or null unless all of it is there. */
+function readGrantFragment(hash: URLSearchParams): Omit<PendingJoinGrant, 'code'> | null {
+  const token = hash.get('grant');
+  const bridgeKey = hash.get('key');
+  const device = hash.get('device');
+  return token && bridgeKey && device ? { device, token, bridgeKey } : null;
+}
+
+/**
+ * An invite link the user pasted rather than opened — the only way in from an
+ * installed PWA, which cannot open a URL into its own context. Takes a full URL
+ * or a bare `/join/<code>#…`; null unless it carries the code and the whole
+ * grant. Never logs the input: the fragment is a bearer secret.
+ */
+export function parseJoinLink(input: string): PendingJoinGrant | null {
+  let url: URL;
+  try {
+    url = new URL(input.trim(), window.location.origin);
+  } catch {
+    return null;
+  }
+  const match = /^\/join\/([^/]+)\/?$/.exec(url.pathname);
+  if (!match) return null;
+  const grant = readGrantFragment(new URLSearchParams(url.hash.replace(/^#/, '')));
+  if (!grant) return null;
+  let code: string;
+  try {
+    code = decodeURIComponent(match[1]);
+  } catch {
+    return null;
+  }
+  return { code, ...grant };
+}
+
+/**
+ * Hold a grant for `adoptJoinGrant`, exactly as opening the link would have —
+ * so a pasted link goes through the same device and pin checks.
+ */
+export function stashJoinGrant(grant: PendingJoinGrant): void {
+  sessionStorage.setItem(PENDING_JOIN_GRANT_KEY, JSON.stringify(grant));
 }
 
 /** The machine a stashed invite grant is for, or null when there is none. */

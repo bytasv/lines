@@ -34,7 +34,8 @@ cryptography cannot close that.
 - The connect-time gate (`ConnectingMachine.tsx` → `EnrollGate`) — where every owner browser but
   the desktop app's own window enrols first, since a machine refuses every relayed owner browser
   until it does; the reason it exists at all. A guest never enrols: their invite link carries the
-  machine key and the grant
+  machine key and the grant. A shared machine's refusal renders `GuestLinkGate` instead, where
+  pasting the invite link adopts its grant in place, for PWAs that cannot open links
 - Tray → **Show encryption code…**, and the enrolled-browser rows beneath it
   (`desktop/src/main.ts`)
 - `npm run enroll -w server` — the same actions without Electron: mint a code, `--list`,
@@ -70,8 +71,9 @@ cryptography cannot close that.
   guest-grant gates
 - `server/scripts/enroll-code.ts` — the CLI half of the tray actions
 - `web/src/lib/e2ee.ts` — the browser's identity (IndexedDB, non-extractable) and pinned keys;
-  a guest's invite grants (`takeJoinGrantFromUrl`, `adoptJoinGrant` — which pins the machine key
-  the invite link carries — and `guestGrantTokens`)
+  a guest's invite grants (`takeJoinGrantFromUrl`, `parseJoinLink` / `stashJoinGrant` for a link
+  pasted rather than opened, `adoptJoinGrant` — which pins the machine key the invite link
+  carries — and `guestGrantTokens`)
 - `web/src/ws.ts` — `beginHandshake`, `writeToLink`, `handleE2eeFrame`, `enrollWithCode`,
   `reconnectMachine`, `needsEnrollment`; `MachineLink.pinned`, and the `guestGrant` frame
 - `web/src/lib/plaintextFrames.ts` — `plaintextFrameAllowed`: which frames arriving in the clear

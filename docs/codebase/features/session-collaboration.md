@@ -238,8 +238,9 @@ Delivery is proposed, not built — see
 - `StorageSyncClient.liveGrantIds(deviceId)` — the grant ids behind this device's live shares and
   invites, or null for "cannot say" (no token, an error, or a storage server without
   `grantTracking`)
-- `takeJoinGrantFromUrl(code)` / `pendingJoinGrantDevice()` / `adoptJoinGrant(deviceId, code?)` /
-  `guestGrantTokens(deviceId)` (`web/src/lib/e2ee.ts`) — stash the link's grant, name its machine,
+- `takeJoinGrantFromUrl(code)` / `parseJoinLink(input)` / `stashJoinGrant(grant)` /
+  `pendingJoinGrantDevice()` / `adoptJoinGrant(deviceId, code?)` / `guestGrantTokens(deviceId)`
+  (`web/src/lib/e2ee.ts`) — stash the link's grant (from the URL or pasted), name its machine,
   bind it once the claim names the same machine, and read the tokens a link presents
 - `mintGuestGrant(deviceId, share)` (`web/src/ws.ts`) — asks one of the user's machines for a
   grant, dialling it and waiting up to 10s for its `hello` if it is not connected; 15s for the
@@ -297,7 +298,8 @@ itself, so a relay that merely *says* someone is a guest gets nowhere.
    already claimed — from another browser, or before site data was cleared — fails the claim;
    `JoinPage` then adopts the grant anyway when the device list shows that machine as shared with
    them. The pairing screen's invitation card adopts after its own claim, which works only if this
-   tab opened the link first.
+   tab opened the link first. A link that cannot be opened (an installed PWA) can be pasted
+   instead, into the guest gate or the pairing screen; it takes the same path from there.
 4. **Connecting.** A link holding tokens is a guest link from the moment it opens (and, once
    `hello` arrives, a link whose `hello` carries `access`), and a guest link never relays the
    user's Clerk token. The browser runs the ordinary handshake against the pinned machine key; the

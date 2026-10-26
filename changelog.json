@@ -1,6 +1,13 @@
 {
   "web": [
     {
+      "version": "0.1.34",
+      "date": "2026-10-26",
+      "items": [
+        "If a machine is shared with you but this device can't open the invite link (for example Lines installed on your phone's home screen), you can now paste the link into Lines to connect."
+      ]
+    },
+    {
       "version": "0.1.33",
       "date": "2026-10-26",
       "items": [

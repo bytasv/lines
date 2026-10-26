@@ -16,16 +16,24 @@ import {
   IconChevronDown,
   IconCopy,
   IconDeviceLaptop,
+  IconLink,
   IconLock,
   IconSend,
   IconPlus,
   IconRefresh,
   IconUnlink,
 } from '@tabler/icons-react';
-import { ENROLL_CODE_LENGTH, normalizeEnrollCode } from '@lines/shared';
+import { ENROLL_CODE_LENGTH, normalizeEnrollCode, type ShareProfile } from '@lines/shared';
 import { sendDiagnostics, type Device } from '../lib/storage';
-import { cryptoUnavailable, takeEnrollCodeFromUrl } from '../lib/e2ee';
-import { enrollWithCode, linkDiagnostics, type LinkDiagnostics } from '../ws';
+import {
+  adoptJoinGrant,
+  cryptoUnavailable,
+  guestGrantTokens,
+  parseJoinLink,
+  stashJoinGrant,
+  takeEnrollCodeFromUrl,
+} from '../lib/e2ee';
+import { enrollWithCode, linkDiagnostics, reconnectMachine, type LinkDiagnostics } from '../ws';
 import { diag, diagReport, markDiagSent } from '../lib/diag';
 import { unlinkedMachineHealth } from '../lib/machineHealth';
 import { useSplash } from '../lib/splash';
@@ -58,6 +66,8 @@ const SLOW_MS = 6000;
 export function ConnectingMachine({
   name,
   deviceId,
+  shared,
+  ownerProfile,
   others,
   onSwitch,
   onPairNew,
@@ -67,6 +77,10 @@ export function ConnectingMachine({
   name: string;
   /** Which machine this is, so an enrollment can name it. */
   deviceId: string;
+  /** Someone else's machine, shared with this account: a refusal there is a
+   *  missing invite grant, which no enrollment code can fix. */
+  shared: boolean;
+  ownerProfile: ShareProfile | null;
   /** Every other machine on the account, so a dead one is never a dead end. */
   others: Device[];
   onSwitch: (id: string) => void;
@@ -130,6 +144,22 @@ export function ConnectingMachine({
   };
 
   if (refusal) {
+    // Keyed on the device list rather than the reason's wording: storage says
+    // whose machine this is, the reason is free text. An owner-key refusal still
+    // gets the enrol form, so a stale `shared` flag cannot hide it.
+    if (shared && !/end-to-end encrypted channel/.test(refusal)) {
+      return (
+        <GuestLinkGate
+          name={name}
+          reason={refusal}
+          deviceId={deviceId}
+          ownerProfile={ownerProfile}
+          others={others}
+          onSwitch={onSwitch}
+          onPairNew={onPairNew}
+        />
+      );
+    }
     return (
       <EnrollGate
         name={name}
@@ -519,45 +549,171 @@ function EnrollGate({
           </Stack>
         </Card>
 
-        {others.length > 0 && (
-          <Stack align="stretch" gap={6} w="100%">
-            <Text size="xs" c="dimmed" ta="center">
-              Or use a different machine:
-            </Text>
-            {others.map((device) => {
-              const health = unlinkedMachineHealth(device);
-              return (
-                <Button
-                  key={device.id}
-                  variant="light"
-                  size="xs"
-                  leftSection={<IconDeviceLaptop size={14} />}
-                  rightSection={
-                    <Group gap={5} wrap="nowrap">
-                      <Text size="xs" c="dimmed">
-                        {health.label}
-                      </Text>
-                      <MachineDot health={health} />
-                    </Group>
-                  }
-                  justify="space-between"
-                  onClick={() => onSwitch(device.id)}
-                >
-                  {device.name}
-                </Button>
-              );
-            })}
-          </Stack>
-        )}
-
-        <Button variant="subtle" size="xs" leftSection={<IconPlus size={14} />} onClick={onPairNew}>
-          Pair a different machine
-        </Button>
-
-        <Text size="xs" c="dimmed" ta="center">
-          {reason}
-        </Text>
+        <GateExits reason={reason} others={others} onSwitch={onSwitch} onPairNew={onPairNew} />
       </Stack>
     </GateShell>
+  );
+}
+
+/**
+ * The way back in when someone else's machine, shared with this account,
+ * refuses this browser for want of its invite grant.
+ *
+ * The grant lives only in the invite link's fragment and in the storage of the
+ * browser that opened it, and an installed PWA can open neither a link nor
+ * another browser's storage — so the link is pasted here instead, and taken up
+ * exactly as `/join` takes it up: the same device and pin checks in
+ * `adoptJoinGrant`, then a re-dial that presents the grant. No claim, because the
+ * share already exists; that is how this machine got into the list.
+ */
+function GuestLinkGate({
+  name,
+  reason,
+  deviceId,
+  ownerProfile,
+  others,
+  onSwitch,
+  onPairNew,
+}: {
+  name: string;
+  reason: string;
+  deviceId: string;
+  ownerProfile: ShareProfile | null;
+  others: Device[];
+  onSwitch: (id: string) => void;
+  onPairNew: () => void;
+}) {
+  const [link, setLink] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const owner = ownerProfile?.name ?? ownerProfile?.email ?? 'The owner';
+  // Still refused while holding a grant: the machine would not redeem it, which
+  // for a well-formed link means it was minted for another account, or revoked.
+  // Read on render, because adopting re-dials and this screen unmounts meanwhile.
+  const held = guestGrantTokens(deviceId).length > 0;
+
+  const connect = () => {
+    setError(null);
+    const parsed = parseJoinLink(link);
+    if (!parsed) {
+      setError('That isn’t a Lines invite link.');
+      return;
+    }
+    if (parsed.device !== deviceId) {
+      setError(`That link is for a different machine, not ${name}.`);
+      return;
+    }
+    stashJoinGrant(parsed);
+    // The input holds a bearer secret: gone as soon as it has been taken up.
+    setLink('');
+    if (!adoptJoinGrant(deviceId, parsed.code)) {
+      setError(`That link names a different key for ${name} than the one this browser already trusts.`);
+      return;
+    }
+    useStore.getState().setE2eeRefusal(null);
+    reconnectMachine(deviceId);
+  };
+
+  return (
+    <GateShell>
+      <Stack align="center" gap="md" maw={460} w="100%">
+        <IconLink size={36} stroke={1.4} />
+        <Stack align="center" gap={4}>
+          <Title order={4}>{name} is shared with you</Title>
+          <GateHint>
+            {owner} shared this machine with an invite link. Paste that link here to connect this
+            device. If you no longer have it, ask them to send it again.
+          </GateHint>
+        </Stack>
+
+        <Card withBorder radius="md" p="md" w="100%">
+          <Stack gap="xs">
+            {held && (
+              <Alert color="orange" variant="light">
+                {name} did not accept the invite this browser holds. It may have been issued to a
+                different account, or withdrawn — ask {ownerProfile ? 'them' : 'the owner'} for a
+                fresh link.
+              </Alert>
+            )}
+            <TextInput
+              placeholder="https://…/join/…"
+              value={link}
+              onChange={(e) => setLink(e.currentTarget.value)}
+              onKeyDown={(e) => e.key === 'Enter' && connect()}
+              autoComplete="off"
+              autoCorrect="off"
+              autoCapitalize="off"
+              spellCheck={false}
+              autoFocus
+            />
+            {error && (
+              <Alert color="red" variant="light">
+                {error}
+              </Alert>
+            )}
+            <Button onClick={connect} disabled={!link.trim()}>
+              Connect
+            </Button>
+          </Stack>
+        </Card>
+
+        <GateExits reason={reason} others={others} onSwitch={onSwitch} onPairNew={onPairNew} />
+      </Stack>
+    </GateShell>
+  );
+}
+
+/** What both refusal gates offer besides their own fix: another machine, a new one, and the machine's own words. */
+function GateExits({
+  reason,
+  others,
+  onSwitch,
+  onPairNew,
+}: {
+  reason: string;
+  others: Device[];
+  onSwitch: (id: string) => void;
+  onPairNew: () => void;
+}) {
+  return (
+    <>
+      {others.length > 0 && (
+        <Stack align="stretch" gap={6} w="100%">
+          <Text size="xs" c="dimmed" ta="center">
+            Or use a different machine:
+          </Text>
+          {others.map((device) => {
+            const health = unlinkedMachineHealth(device);
+            return (
+              <Button
+                key={device.id}
+                variant="light"
+                size="xs"
+                leftSection={<IconDeviceLaptop size={14} />}
+                rightSection={
+                  <Group gap={5} wrap="nowrap">
+                    <Text size="xs" c="dimmed">
+                      {health.label}
+                    </Text>
+                    <MachineDot health={health} />
+                  </Group>
+                }
+                justify="space-between"
+                onClick={() => onSwitch(device.id)}
+              >
+                {device.name}
+              </Button>
+            );
+          })}
+        </Stack>
+      )}
+
+      <Button variant="subtle" size="xs" leftSection={<IconPlus size={14} />} onClick={onPairNew}>
+        Pair a different machine
+      </Button>
+
+      <Text size="xs" c="dimmed" ta="center">
+        {reason}
+      </Text>
+    </>
   );
 }

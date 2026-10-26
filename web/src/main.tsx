@@ -224,6 +224,8 @@ function DeviceGate({ children }: { children: React.ReactNode }) {
       <ConnectingMachine
         name={chosen.name}
         deviceId={chosen.id}
+        shared={!!chosen.shared}
+        ownerProfile={chosen.ownerProfile ?? null}
         others={devices.filter((d) => d.id !== chosen.id)}
         onSwitch={setPickedId}
         onPairNew={() => setPairingNew(true)}

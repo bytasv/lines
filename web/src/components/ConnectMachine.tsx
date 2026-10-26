@@ -28,7 +28,7 @@ import {
 import { rememberDeviceId, rememberedDeviceId } from '../lib/storage';
 import { clearPendingPairCode, pendingPairCode } from '../lib/deviceMemory';
 import { switchDevice } from '../ws';
-import { adoptJoinGrant } from '../lib/e2ee';
+import { adoptJoinGrant, parseJoinLink, stashJoinGrant } from '../lib/e2ee';
 import { DownloadDesktopApp } from './DownloadDesktopApp';
 import { GateShell } from './GateShell';
 import { PairingDiagram } from './PairingDiagram';
@@ -145,6 +145,7 @@ export function ConnectMachine() {
             of their own at all — telling them to install a desktop app first
             would be answering a question they never asked. */}
         <PendingInvitations />
+        <PasteInviteLink />
 
         <Card withBorder radius="md" p="md">
           <PairingDiagram />
@@ -289,6 +290,76 @@ function PendingInvitations() {
         </Text>
       </Stack>
     </Card>
+  );
+}
+
+/**
+ * An invite that arrived as a link the user cannot open here — an installed
+ * PWA has no way to open a URL into its own context, and the grant in the
+ * link's fragment exists nowhere else. Pasting it does what opening `/join`
+ * would have: claim the invite, then take up its grant through the same checks.
+ */
+function PasteInviteLink() {
+  const refresh = useDevices((s) => s.refresh);
+  const [link, setLink] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  if (!SHARING_ENABLED) return null;
+
+  const submit = async () => {
+    if (busy || !link.trim()) return;
+    setError(null);
+    const parsed = parseJoinLink(link);
+    if (!parsed) {
+      setError('That isn’t a Lines invite link.');
+      return;
+    }
+    setBusy(true);
+    // The input holds a bearer secret: gone as soon as it has been read.
+    setLink('');
+    try {
+      const { deviceId } = await claimInvite(parsed.code);
+      stashJoinGrant(parsed);
+      adoptJoinGrant(deviceId, parsed.code);
+      rememberDeviceId(deviceId);
+      switchDevice(deviceId);
+      // The gate re-renders off the device list, so this is what takes them in.
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Stack gap={6}>
+      <Text size="sm" c="dimmed">
+        Have an invite link? Paste it here.
+      </Text>
+      <Group gap="xs" wrap="nowrap">
+        <TextInput
+          placeholder="https://…/join/…"
+          value={link}
+          onChange={(e) => setLink(e.currentTarget.value)}
+          onKeyDown={(e) => e.key === 'Enter' && void submit()}
+          autoComplete="off"
+          autoCorrect="off"
+          autoCapitalize="off"
+          spellCheck={false}
+          disabled={busy}
+          style={{ flex: 1 }}
+        />
+        <Button onClick={() => void submit()} disabled={!link.trim() || busy} loading={busy}>
+          Join
+        </Button>
+      </Group>
+      {error && (
+        <Alert color="red" icon={<IconAlertCircle size={16} />} variant="light">
+          {error}
+        </Alert>
+      )}
+    </Stack>
   );
 }
 
