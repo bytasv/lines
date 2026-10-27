@@ -26,19 +26,21 @@ iOS 16.4+, the app added to the home screen, and a permission prompt granted fro
   `Notification` constructor); shares `isAlertTransition`/`alertBody` with the bridge
 - `web/src/lib/machines.ts` — `alertTarget`, the click-routing lookup; see
   [multi-machine-client](multi-machine-client.md)
-- `web/src/store.ts` — `setAlertsEnabled` registers/unregisters on every owner link;
-  `openSessionFromAlert`; a `hello` from a push-capable owner machine re-sends `registerPush`
+- `web/src/store.ts` — `setAlertsEnabled` registers/unregisters on every push-capable link, owned
+  or guest; `openSessionFromAlert`; a `hello` from a push-capable machine re-sends `registerPush`
 - `web/src/ws.ts` — `sendToMachine(deviceId, msg)`, the one way to reach a non-primary owned
   machine outside the normal session-routed `send()`
 - `web/src/components/NotificationsSection.tsx` — the Alerts pane, including the "Add to Home Screen" hint on iOS outside standalone
-- `server/src/pushNotifier.ts` — `PushNotifier`: registration storage, the endpoint allowlist, and
-  the actual send
+- `server/src/pushNotifier.ts` — `PushNotifier`: owner and guest registration storage, the endpoint
+  allowlist, the guest reach check, and the actual send
 - `server/src/store.ts` — `loadPushSubscriptions`/`savePushSubscriptions`
-  (`push-subscriptions.json`, mode `0600`)
+  (`push-subscriptions.json`, mode `0600`) and `loadGuestPushSubscriptions`/
+  `saveGuestPushSubscriptions` (`push-guest-subscriptions.json`, mode `0600`)
 - `server/src/userContext.ts` — one `PushNotifier` per user; `onSessionUpsert` called from the
   `broadcast` closure, skipped while sync is applying pulled state
-- `server/src/index.ts` — `registerPush`/`unregisterPush` dispatch; `pushAvailable: true` on the
-  owner `hello`
+- `server/src/index.ts` — `registerPush`/`unregisterPush` dispatch (owner or guest, by the socket's
+  access); `pushAvailable: true` on the owner and guest `hello`; `closeGuestSockets` drops a
+  grant's guest push rows
 - `shared/types.ts` — `registerPush`/`unregisterPush` messages, `ALERT_STATUSES`,
   `isAlertTransition`, `alertBody`, `PushSubscriptionJson`, `VapidKeyPair`, `PushRegistration`,
   `PushPayload`
@@ -54,10 +56,20 @@ iOS 16.4+, the app added to the home screen, and a permission prompt granted fro
 - `alertBody(session)` (shared) — the notification text; same labels the sidebar badge uses
   (`waitingPermissionMeta`). A workflow park reads "Step i of n finished" ("Step finished" with no
   workflow), never "Needs approval"
-- `PushNotifier` — one per user. `register`/`unregister` upsert/remove by subscription endpoint;
-  `onSessionUpsert(meta)` keeps its own `Map<sessionId, lastStatus>` (the bridge mutates `meta` in
-  place, so the previous status is gone by broadcast time) and calls the injected sender on a
-  transition
+- `PushNotifier` — one per user. `register`/`unregister` upsert/remove owner rows by subscription
+  endpoint; `onSessionUpsert(meta)` keeps its own `Map<sessionId, lastStatus>` (the bridge mutates
+  `meta` in place, so the previous status is gone by broadcast time) and calls the injected sender
+  on a transition
+- `registerGuest(raw, reach)` / `unregisterGuest(endpoint, userId)` — the guest half. Upsert and
+  remove only within the guest list, keyed by endpoint and the guest's `userId`; never touch an
+  owner row. At most `GUEST_PUSH_CAP` (5) rows per guest, oldest evicted
+- `dropGuestGrants(grantIds)` — removes every guest row registered under any of those grant ids
+- `guestMayPush(reg, sessionId)` — the per-session reach a guest row is judged by, the same branch
+  as `mayReceive` (machine reach covers every session; session reach covers its own list)
+- `GuestPushRegistration` (shared) — `PushRegistration` plus `guest: { userId, grantIds, scope,
+  sessionIds? }`, the reach of the socket that registered it
+- `closeGuestSockets(ctx, grantIds, reason)` (`server/src/index.ts`) — also calls `dropGuestGrants`,
+  so every path that ends or changes a grant (revoke, update, reconcile) drops its push rows
 - `isAllowedPushEndpoint(endpoint)` — the SSRF guard: `https:` only, no port, no userinfo, host is
   `fcm.googleapis.com` or ends in `.push.apple.com` / `.push.services.mozilla.com` /
   `.notify.windows.com`
@@ -74,20 +86,25 @@ iOS 16.4+, the app added to the home screen, and a permission prompt granted fro
 
 1. **Subscribe.** Settings → Alerts on → `Notification.requestPermission()` granted →
    `ensurePushSubscription()` creates a `PushSubscription` under this device's VAPID public key →
-   the store sends `registerPush { subscription, vapid }` to every owned machine whose `hello` said
-   `pushAvailable`. Idempotent: also re-sent whenever an owner link's `hello` lands, so a newly
-   paired machine or one that lost its subscriptions file picks it up.
+   the store sends `registerPush { subscription, vapid }` to every machine, owned or shared with
+   this user, whose `hello` said `pushAvailable`. Idempotent: also re-sent whenever a link's
+   `hello` lands, so a newly paired or newly shared machine, or one that lost its subscriptions
+   file, picks it up.
 2. **Register.** The bridge validates the endpoint against the allowlist and the key shapes
-   (`parseRegistration`), upserts by endpoint into `push-subscriptions.json`, and does nothing
-   further with the wire message — it never contacts the push service until there is something to
+   (`parseRegistration`). An owner's registration upserts by endpoint into
+   `push-subscriptions.json`. A guest's registration (the socket's `access` is not owner) goes
+   through `registerGuest` with that socket's reach and grant ids into
+   `push-guest-subscriptions.json`. Nothing contacts the push service until there is something to
    send.
 3. **Session settles.** `SessionManager` broadcasts `sessionUpsert`. `userContext`'s `broadcast`
    closure calls `pushNotifier.onSessionUpsert(session)` — unless the broadcast is happening while
    `sync.applying` is true, i.e. `adoptSynced` folding in a session pulled from another machine.
    `isAlertTransition` decides whether this is push-worthy; `alertBody` builds the text.
-4. **Send.** For each registration, `webpush.sendNotification(subscription, payload, {
-   vapidDetails: { subject, publicKey, privateKey }, TTL: 3600 })`. A 404/410 deletes that
-   registration; any other failure is logged and the registration is kept.
+4. **Send.** The targets are every owner row, plus each guest row whose reach covers this session
+   (`guestMayPush`); a device present in both lists is pushed once. For each target,
+   `webpush.sendNotification(subscription, payload, { vapidDetails: { subject, publicKey,
+   privateKey }, TTL: 3600 })`. A 404/410 deletes that row from the list it came from; any other
+   failure is logged and the row is kept.
 5. **Deliver.** The push service wakes `sw.js`'s `push` handler, which calls
    `registration.showNotification(title, { body, tag: sessionId, icon, data: { sessionId } })`.
    `tag = sessionId` collapses a push and an in-page alert for the same session into one
@@ -98,7 +115,11 @@ iOS 16.4+, the app added to the home screen, and a permission prompt granted fro
    (`App.tsx`) both funnel into `openSessionFromAlert`, which uses `alertTarget` to switch machine
    and project tab before selecting the session.
 7. **Unsubscribe.** Alerts off → `removePushSubscription()` unsubscribes the browser and returns
-   its endpoint → `unregisterPush { endpoint }` to every owned machine.
+   its endpoint → `unregisterPush { endpoint }` to every machine, owned or shared. A guest's
+   unregister removes only that guest's own row.
+8. **Revoke or narrow.** A grant that is revoked, changed or reconciled away closes its guest
+   sockets (`closeGuestSockets`), which drops that grant's guest rows. The guest's browser
+   reconnects, gets a fresh `hello`, and re-registers under its new reach, if it still has one.
 
 ## Tests
 
@@ -111,8 +132,8 @@ iOS 16.4+, the app added to the home screen, and a permission prompt granted fro
   earlier step is not; `alertBody`'s "Step i of n finished" text
 - `server/src/machineMerge.test.ts` — `alertTarget` (imports `web/src/lib/machines.ts`; see
   [multi-machine-client](multi-machine-client.md))
-- `server/src/messageAuthz.test.ts` — `registerPush`/`unregisterPush` are in the owner-only,
-  never-grantable set
+- `server/src/messageAuthz.test.ts` — `registerPush`/`unregisterPush` are classified `connection`,
+  so a view-only session guest is admitted at the gate; the handler then scopes a guest's row
 
 ## Business rules
 
@@ -124,10 +145,21 @@ iOS 16.4+, the app added to the home screen, and a permission prompt granted fro
   tied to one application-server key, so with several machines every bridge has to sign with the
   same key — the device is the only party common to all of them, so it creates the key and hands
   it to each bridge it registers with.
-- **Owner only.** `registerPush`/`unregisterPush` need `{ needs: 'owner' }`: a guest's access is
-  already narrowed to specific sessions, and a push subscription would leak every session on the
-  machine regardless of that grant. The bridge also POSTs to whatever endpoint the client supplies,
-  which is the second reason.
+- **Guests subscribe too, scoped to their grant.** `registerPush`/`unregisterPush` are
+  `{ needs: 'connection' }`; the handler branches on the socket's access. A guest's row carries
+  that socket's reach (machine, or its session list) and its grant ids, and is pushed only for
+  sessions that reach covers, so a session share is silent for sessions outside it. A guest row
+  lives in `push-guest-subscriptions.json`, so a downgraded bridge never reads it as an owner row
+  and pushes every session.
+- **A guest row lasts as long as its grant.** Revoking, changing or reconciling away the grant
+  drops its rows (`dropGuestGrants`, via `closeGuestSockets`). Changing a preset closes the socket,
+  so the guest re-registers under the new reach on reconnect. Until a revoke reaches the bridge
+  (a share revoked in storage while the host's browser is away), the guest still gets pushes, no
+  more than they already saw live.
+- **Per-guest cap.** A guest holds at most 5 rows; registering a sixth evicts their oldest, so one
+  guest cannot make the host's bridge POST on every transition from many devices.
+- The bridge also POSTs to whatever endpoint the client supplies, which is why the endpoint
+  allowlist applies to guest rows exactly as it does to owner rows.
 - **Endpoint allowlist**, to block SSRF through that POST: `https:` only, no explicit port, no
   userinfo, and the host must be `fcm.googleapis.com` or end in `.push.apple.com`,
   `.push.services.mozilla.com`, or `.notify.windows.com`.
@@ -154,7 +186,7 @@ iOS 16.4+, the app added to the home screen, and a permission prompt granted fro
 - An older bridge never sets `iteratedStep`, so its iteration parks still alert, with the new text.
 - **Tag-based dedupe.** A push and an in-page alert for the same session both use
   `tag: sessionId`, so on one device they collapse into a single notification instead of stacking.
-- **Version skew.** The owner `hello` carries `pushAvailable: true`; the client only sends
+- **Version skew.** The owner and guest `hello` carry `pushAvailable: true`; the client only sends
   `registerPush` to a machine that said so, rather than to every bridge unconditionally — an older
   bridge would otherwise answer the unknown message type with a visible `error` on every `hello`.
 - **iOS needs the home-screen app.** Push only reaches iOS/iPadOS from the app added to the home
@@ -182,6 +214,9 @@ iOS 16.4+, the app added to the home screen, and a permission prompt granted fro
 - `PushNotifier` is modeled on `SpendHistory`: one instance per `UserContext`, backed by a single
   JSON file loaded at construction and rewritten on change, with the network call itself injected
   so tests never reach it.
+- Guest rows are a separate list in a separate file, never mixed with owner rows. The two lists are
+  sent to together only inside `onSessionUpsert`, and `pushAll` removes an expired row from the
+  list it came from.
 - The alert transition rule lives once, in `shared/types.ts` (`isAlertTransition`, `alertBody`,
   `ALERT_STATUSES`), and both the page's `maybeAlert` and the bridge's `PushNotifier` call it — so
   a phone and a desktop tab can never disagree about what counts as an alert or what it says.
@@ -203,6 +238,8 @@ iOS 16.4+, the app added to the home screen, and a permission prompt granted fro
   machine/project click routing
 - [session-and-project-ui](session-and-project-ui.md) — `maybeAlert`'s transition rule, now shared
   with the bridge via `isAlertTransition`
+- [session-collaboration](session-collaboration.md) — guests receive pushes scoped to their grant,
+  and lose them when the grant ends
 - [end-to-end-encryption](end-to-end-encryption.md) — Web Push has its own end-to-end encryption
   (the push service only ever sees ciphertext); unrelated to, and not a substitute for, the app's
   own E2EE channel

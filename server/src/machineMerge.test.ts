@@ -399,6 +399,51 @@ describe('alertTarget', () => {
     assert.equal(alertTarget({ ...base, sessionId: 'k1' })?.projectPath, '/repo/main');
   });
 
+  test("a session on a machine shared with us lands on the host's tab", () => {
+    const target = alertTarget({
+      sessionId: 'h1',
+      sessions: { h1: at('h1', '/host/repo') },
+      sessionMachine: { h1: 'host' },
+      machines: {
+        host: machine('host', {
+          projects: [{ path: '/host/repo' }],
+          access: { scope: 'machine' } as MachineView['access'],
+        }),
+      },
+      primaryDeviceId: 'laptop',
+      projects: [{ path: '/Users/me/other' }],
+      projectKeys: {},
+    });
+    assert.deepEqual(target, { deviceId: 'host', switchMachine: true, projectPath: '/host/repo' });
+  });
+
+  test('a session share lands on the tab synthesized from its shared sessions', () => {
+    // A session share's hello carries no projects; `machineView` builds its tabs
+    // from the shared sessions, so the click still finds one.
+    const shared = at('h1', '/host/repo');
+    const hello = {
+      type: 'hello',
+      sessions: [shared],
+      projects: [],
+      projectKeys: {},
+      workflows: [],
+      models: [],
+      recentDirs: [],
+      auth: { loggedIn: false },
+      access: { scope: 'session', sessionIds: ['h1'] },
+    } as unknown as Extract<ServerMessage, { type: 'hello' }>;
+    const target = alertTarget({
+      sessionId: 'h1',
+      sessions: { h1: shared },
+      sessionMachine: { h1: 'host' },
+      machines: { host: { ...emptyMachine('host'), view: machineView(hello, emptyView()) } },
+      primaryDeviceId: 'laptop',
+      projects: [{ path: '/Users/me/other' }],
+      projectKeys: {},
+    });
+    assert.deepEqual(target, { deviceId: 'host', switchMachine: true, projectPath: '/host/repo' });
+  });
+
   test('an unknown session has no target', () => {
     const target = alertTarget({
       sessionId: 'gone',

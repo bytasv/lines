@@ -92,10 +92,6 @@ describe('MESSAGE_AUTHZ', () => {
     assert.ok(ownerOnly.includes('openaiConsumeResetCredit'));
     assert.ok(ownerOnly.includes('installUpdate'));
     assert.ok(ownerOnly.includes('pickFolder'));
-    // Push covers every session on the machine, and the bridge POSTs to the
-    // endpoint the message supplies.
-    assert.ok(ownerOnly.includes('registerPush'));
-    assert.ok(ownerOnly.includes('unregisterPush'));
     // The host's own TypeSafe key, billed to them.
     assert.ok(ownerOnly.includes('setTypesafeKey'));
     assert.ok(ownerOnly.includes('clearTypesafeKey'));
@@ -106,6 +102,17 @@ describe('MESSAGE_AUTHZ', () => {
         assert.equal(verdict.ok, false, `${type} must stay owner-only at ${scope} scope`);
       }
     }
+  });
+
+  test('push registration is open to every connection; the handler scopes guests', () => {
+    // A guest row is stored apart and pushed only within the socket's reach (see
+    // PushNotifier.registerGuest), so the gate itself admits even a view-only
+    // session guest.
+    assert.deepEqual(MESSAGE_AUTHZ.registerPush, { needs: 'connection' });
+    assert.deepEqual(MESSAGE_AUTHZ.unregisterPush, { needs: 'connection' });
+    const viewer = guest('view', { scope: 'session', sessionIds: ['s1'] });
+    assert.equal(authorizeMessage(msg('registerPush'), viewer).ok, true);
+    assert.equal(authorizeMessage(msg('unregisterPush'), viewer).ok, true);
   });
 
   test('only Full access can change the permission mode', () => {

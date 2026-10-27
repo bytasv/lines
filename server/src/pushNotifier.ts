@@ -12,10 +12,16 @@
  * Subscriptions are bridge-local and never synced: each device registers with
  * every machine it owns (see `registerPush`), so each bridge pushes for its own
  * sessions — the same "not scoped to the primary machine" rule as web `maybeAlert`.
+ *
+ * A guest's devices register too, as separate rows that carry the reach of the
+ * socket that registered them (see `registerGuest`): they are pushed only for
+ * sessions that guest could already see, and dropped when a grant behind them
+ * is revoked or changed (`dropGuestGrants`).
  */
 import webpush from 'web-push';
 import { alertBody, isAlertTransition } from '@lines/shared';
 import type {
+  GuestPushRegistration,
   PushPayload,
   PushRegistration,
   PushSubscriptionJson,
@@ -92,6 +98,41 @@ export function parseRegistration(raw: {
   };
 }
 
+/** How many devices one guest may subscribe to a host's machine. Each one is a
+ *  POST from the host's bridge on every alert, so the oldest beyond this goes. */
+export const GUEST_PUSH_CAP = 5;
+
+/** The reach a guest registration carries: the registering socket's, as admitted. */
+export type GuestPushReach = GuestPushRegistration['guest'];
+
+/** A stored guest row the bridge can send with, or null. Same checks as
+ *  `parseRegistration`, plus the reach, which a hand-edited file could mangle. */
+function parseGuestRegistration(raw: Partial<GuestPushRegistration>): GuestPushRegistration | null {
+  const reg = parseRegistration(raw);
+  const guest = parseGuestReach(raw.guest);
+  return reg && guest ? { ...reg, guest } : null;
+}
+
+function parseGuestReach(raw: Partial<GuestPushReach> | null | undefined): GuestPushReach | null {
+  if (!raw || typeof raw.userId !== 'string' || !raw.userId) return null;
+  if (!Array.isArray(raw.grantIds) || !raw.grantIds.length) return null;
+  if (!raw.grantIds.every((id) => typeof id === 'string')) return null;
+  if (raw.scope === 'machine') return { userId: raw.userId, grantIds: [...raw.grantIds], scope: 'machine' };
+  if (raw.scope !== 'session') return null;
+  // A session share always names its sessions; without the list the row is malformed.
+  if (!Array.isArray(raw.sessionIds) || !raw.sessionIds.every((id) => typeof id === 'string')) return null;
+  return { userId: raw.userId, grantIds: [...raw.grantIds], scope: 'session', sessionIds: [...raw.sessionIds] };
+}
+
+/**
+ * Whether a guest row may be pushed for this session. Mirrors the per-session
+ * branch of `mayReceive` (userContext.ts): a machine grant covers every
+ * session, a session share exactly its own.
+ */
+export function guestMayPush(reg: GuestPushRegistration, sessionId: string): boolean {
+  return reg.guest.scope === 'machine' || !!reg.guest.sessionIds?.includes(sessionId);
+}
+
 /** Sends one push; injected so tests never reach the network. Rejects with a
  *  `statusCode` on an upstream refusal, as `webpush.sendNotification` does. */
 export type PushSender = (reg: PushRegistration, payload: string) => Promise<unknown>;
@@ -110,24 +151,41 @@ export function pushPayload(session: SessionMeta): PushPayload | null {
 
 export class PushNotifier {
   private regs: PushRegistration[];
+  /** Guests' devices, apart from `regs` and persisted to their own file. */
+  private guestRegs: GuestPushRegistration[];
   private lastStatus = new Map<string, SessionStatus>();
   /** Whether the session sits in a muted sidebar group; muted sessions never push.
    *  Wired by the user context, which owns the settings. */
   isMuted: (session: SessionMeta) => boolean = () => false;
 
   constructor(
-    private store: Pick<Store, 'loadPushSubscriptions' | 'savePushSubscriptions'>,
+    private store: Pick<
+      Store,
+      | 'loadPushSubscriptions'
+      | 'savePushSubscriptions'
+      | 'loadGuestPushSubscriptions'
+      | 'saveGuestPushSubscriptions'
+    >,
     private send: PushSender = webPushSender,
   ) {
     this.regs = store
       .loadPushSubscriptions()
       .map((r) => parseRegistration(r))
       .filter((r): r is PushRegistration => r !== null);
+    this.guestRegs = store
+      .loadGuestPushSubscriptions()
+      .map((r) => parseGuestRegistration(r))
+      .filter((r): r is GuestPushRegistration => r !== null);
   }
 
   /** Subscribed devices, for tests and diagnostics. */
   get registrations(): readonly PushRegistration[] {
     return this.regs;
+  }
+
+  /** Guests' subscribed devices, for tests and diagnostics. */
+  get guestRegistrations(): readonly GuestPushRegistration[] {
+    return this.guestRegs;
   }
 
   /** Upsert by endpoint. False when the registration is malformed or its endpoint
@@ -156,6 +214,43 @@ export class PushNotifier {
   }
 
   /**
+   * A guest's device, scoped to `reach`. Upserts by endpoint within the guest
+   * list only — an owner row with the same endpoint is never touched. A guest
+   * holds at most `GUEST_PUSH_CAP` rows; registering one more evicts their
+   * least recently changed. False when the registration (or reach) is malformed.
+   */
+  registerGuest(raw: Parameters<typeof parseRegistration>[0], reach: GuestPushReach): boolean {
+    const reg = parseGuestRegistration({ ...raw, guest: reach } as Partial<GuestPushRegistration>);
+    if (!reg) return false;
+    const endpoint = reg.subscription.endpoint;
+    const i = this.guestRegs.findIndex((r) => r.subscription.endpoint === endpoint);
+    // Resent on every hello; an identical row is not worth a write.
+    if (i >= 0 && JSON.stringify(this.guestRegs[i]) === JSON.stringify(reg)) return true;
+    // Changed rows move to the end, so list order is oldest first.
+    const next = this.guestRegs.filter((r) => r.subscription.endpoint !== endpoint);
+    next.push(reg);
+    const mine = next.filter((r) => r.guest.userId === reg.guest.userId);
+    const evict = new Set(mine.slice(0, Math.max(0, mine.length - GUEST_PUSH_CAP)));
+    this.guestRegs = next.filter((r) => !evict.has(r));
+    this.saveGuests();
+    return true;
+  }
+
+  /** Removes this guest's row for the endpoint, and nobody else's. */
+  unregisterGuest(endpoint: string, userId: string): void {
+    this.setGuests(
+      this.guestRegs.filter((r) => r.subscription.endpoint !== endpoint || r.guest.userId !== userId),
+    );
+  }
+
+  /** Drops every guest row registered under any of these grants: the grant was
+   *  revoked, or changed and its sockets closed to come back with a new reach. */
+  dropGuestGrants(grantIds: Set<string>): void {
+    if (!grantIds.size) return;
+    this.setGuests(this.guestRegs.filter((r) => !r.guest.grantIds.some((id) => grantIds.has(id))));
+  }
+
+  /**
    * Called for every `sessionUpsert` this bridge broadcasts about its own
    * sessions — never for sessions adopted from sync, which ran elsewhere and are
    * reset to idle here. Pushes on the same transitions web `maybeAlert` chimes on.
@@ -163,11 +258,17 @@ export class PushNotifier {
   onSessionUpsert(session: SessionMeta): void {
     const prev = this.lastStatus.get(session.id);
     this.lastStatus.set(session.id, session.status);
-    if (!this.regs.length || !isAlertTransition(prev, session)) return;
+    if (!this.regs.length && !this.guestRegs.length) return;
+    if (!isAlertTransition(prev, session)) return;
     if (this.isMuted(session)) return;
     const payload = pushPayload(session);
     if (!payload) return;
-    void this.pushAll(JSON.stringify(payload));
+    // A device that is also an owner row already gets this push.
+    const owned = new Set(this.regs.map((r) => r.subscription.endpoint));
+    const guests = this.guestRegs.filter(
+      (r) => !owned.has(r.subscription.endpoint) && guestMayPush(r, session.id),
+    );
+    void this.pushAll(JSON.stringify(payload), [...this.regs, ...guests]);
   }
 
   /** A deleted session must not keep its status around to compare against. */
@@ -175,16 +276,18 @@ export class PushNotifier {
     this.lastStatus.delete(sessionId);
   }
 
-  private async pushAll(payload: string): Promise<void> {
+  private async pushAll(payload: string, targets: readonly PushRegistration[]): Promise<void> {
     await Promise.all(
-      this.regs.map(async (reg) => {
+      targets.map(async (reg) => {
         try {
           await this.send(reg, payload);
         } catch (err) {
           const status = (err as { statusCode?: number }).statusCode;
           if (status != null && EXPIRED_STATUSES.has(status)) {
-            // The device unsubscribed, or the push service expired it.
-            this.unregister(reg.subscription.endpoint);
+            // The device unsubscribed, or the push service expired it. Removed
+            // from the list it came from only.
+            if ('guest' in reg) this.setGuests(this.guestRegs.filter((r) => r !== reg));
+            else this.unregister(reg.subscription.endpoint);
             return;
           }
           // The endpoint's host only: the path is the device's capability URL.
@@ -199,5 +302,16 @@ export class PushNotifier {
 
   private save(): void {
     this.store.savePushSubscriptions(this.regs);
+  }
+
+  /** Replace the guest list, writing only when something was removed. */
+  private setGuests(next: GuestPushRegistration[]): void {
+    if (next.length === this.guestRegs.length) return;
+    this.guestRegs = next;
+    this.saveGuests();
+  }
+
+  private saveGuests(): void {
+    this.store.saveGuestPushSubscriptions(this.guestRegs);
   }
 }

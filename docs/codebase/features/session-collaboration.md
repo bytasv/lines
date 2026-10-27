@@ -77,6 +77,9 @@ Delivery is proposed, not built — see
 - `server/src/guestGrants.ts` — the grants this machine minted (`~/.lines-app/guest-grants.json`,
   `0600`, token hashes only): mint, redeem, update, revoke, reconcile, `combineGrants`,
   `guestAccessFor`
+- `server/src/pushNotifier.ts` — a guest's Web Push rows (`push-guest-subscriptions.json`), scoped
+  to the reach their socket was admitted with and dropped with their grant; see
+  [web-push-notifications](web-push-notifications.md)
 - `server/src/e2eeChannel.ts` — the guest path of `SecureChannel`: handshake with any client
   key, then `admitGuest` on the first sealed frame (the owner path belongs to
   [end-to-end-encryption](end-to-end-encryption.md))
@@ -234,7 +237,9 @@ Delivery is proposed, not built — see
 - `GRANT_CLAIM_TTL_MS` — 7 days, an unredeemed grant's lifetime (the invite's own); a redeemed one
   lasts until revoked
 - `closeGuestSockets(ctx, grantIds, reason)` (`server/src/index.ts`) — closes `1008` every guest
-  socket admitted on any of those grants
+  socket admitted on any of those grants, and drops their guest push rows (`dropGuestGrants`)
+- `PushNotifier.registerGuest` / `dropGuestGrants` / `guestMayPush` (`server/src/pushNotifier.ts`) —
+  a guest's Web Push row, pushed only for sessions inside its reach
 - `StorageSyncClient.liveGrantIds(deviceId)` — the grant ids behind this device's live shares and
   invites, or null for "cannot say" (no token, an error, or a storage server without
   `grantTracking`)
@@ -695,6 +700,11 @@ resolves a person through — so they can never disagree about who somebody is.
   `SessionManager.switchProvider` — the same documented pattern `interjectQueued` already uses
   for the check this table cannot carry. See
   [cross-provider-model-switching](cross-provider-model-switching.md).
+- A guest may register a device for Web Push on the machine, and gets alerts only for sessions
+  their grant reaches (every session for a machine share, its own list for a session share). The
+  rows are dropped when the grant is revoked, changed or reconciled away, so a revoked guest stops
+  getting pushes. A guest cannot register an endpoint the host's allowlist refuses, and at most
+  five devices per guest are kept.
 - The collaborator address book (`ShareContact`) is decoupled from grant state on purpose:
   revoking a share, letting an invite expire unclaimed, or the invite being claimed-then-revoked
   never removes the remembered address — that is exactly the case the book exists to survive.
@@ -780,6 +790,8 @@ resolves a person through — so they can never disagree about who somebody is.
 - [permissions-and-plan-mode](permissions-and-plan-mode.md) — `resolvedActor` alongside
   `resolvedBy`.
 - [cloud-sync-sessions](cloud-sync-sessions.md) — why a guest connection must never sync.
+- [web-push-notifications](web-push-notifications.md) — guest push rows, scoped to the grant that
+  registered them and dropped with it.
 - [turn-interjection](turn-interjection.md) — releasing a queued item into the turn already
   running, built on this feature's queue, `MESSAGE_AUTHZ`, and attribution.
 - [cross-provider-model-switching](cross-provider-model-switching.md) — `switchProvider`'s

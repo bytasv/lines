@@ -1,8 +1,16 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import { alertBody, isAlertTransition, isSessionMuted } from '@lines/shared';
-import type { PushRegistration, SessionMeta, WorkflowState, WorkflowStepStatus } from '@lines/shared';
-import { PushNotifier, isAllowedPushEndpoint, parseRegistration, pushPayload } from './pushNotifier.ts';
+import type { GuestPushRegistration, PushRegistration, SessionMeta, WorkflowState, WorkflowStepStatus } from '@lines/shared';
+import {
+  GUEST_PUSH_CAP,
+  PushNotifier,
+  guestMayPush,
+  isAllowedPushEndpoint,
+  parseRegistration,
+  pushPayload,
+  type GuestPushReach,
+} from './pushNotifier.ts';
 
 /**
  * Web Push of session alerts from the bridge.
@@ -29,15 +37,22 @@ const wf = (stepIndex: number, stepStatuses: WorkflowStepStatus[], started = tru
   started,
 });
 
-/** An in-memory stand-in for the two Store methods the notifier uses. */
-function memStore(initial: PushRegistration[] = []) {
+/** An in-memory stand-in for the Store methods the notifier uses. */
+function memStore(initial: PushRegistration[] = [], initialGuests: GuestPushRegistration[] = []) {
   let rows = initial;
+  let guestRows = initialGuests;
   let saves = 0;
+  let guestSaves = 0;
   return {
     loadPushSubscriptions: () => rows,
     savePushSubscriptions: (next: PushRegistration[]) => {
       rows = [...next];
       saves++;
+    },
+    loadGuestPushSubscriptions: () => guestRows,
+    saveGuestPushSubscriptions: (next: GuestPushRegistration[]) => {
+      guestRows = [...next];
+      guestSaves++;
     },
     get rows() {
       return rows;
@@ -45,7 +60,34 @@ function memStore(initial: PushRegistration[] = []) {
     get saves() {
       return saves;
     },
+    get guestRows() {
+      return guestRows;
+    },
+    get guestSaves() {
+      return guestSaves;
+    },
   };
+}
+
+const machineGuest = (over: Partial<GuestPushReach> = {}): GuestPushReach => ({
+  userId: 'guest-a',
+  grantIds: ['g-machine'],
+  scope: 'machine',
+  ...over,
+});
+
+const sessionGuest = (sessionIds: string[], over: Partial<GuestPushReach> = {}): GuestPushReach => ({
+  userId: 'guest-b',
+  grantIds: ['g-session'],
+  scope: 'session',
+  sessionIds,
+  ...over,
+});
+
+/** Drive one alerting transition for a session. */
+function transition(n: PushNotifier, id: string): void {
+  n.onSessionUpsert(session({ id, status: 'running' }));
+  n.onSessionUpsert(session({ id, status: 'done' }));
 }
 
 /** A sender that records calls and answers with whatever `answer` returns. */
@@ -322,6 +364,168 @@ describe('PushNotifier', () => {
     n.onSessionUpsert(session({ status: 'done' }));
     await settle();
     assert.equal(n.registrations.length, 1);
+  });
+});
+
+describe('PushNotifier guests', () => {
+  test('a machine guest is pushed for any session', async () => {
+    const rec = recorder();
+    const n = new PushNotifier(memStore(), rec.send);
+    assert.equal(n.registerGuest(reg('https://fcm.googleapis.com/guest'), machineGuest()), true);
+    transition(n, 's1');
+    transition(n, 's2');
+    await settle();
+    assert.deepEqual(
+      rec.calls.map((c) => (c.payload as { sessionId: string }).sessionId),
+      ['s1', 's2'],
+    );
+  });
+
+  test('a session guest is pushed only for its own sessions', async () => {
+    const rec = recorder();
+    const n = new PushNotifier(memStore(), rec.send);
+    n.registerGuest(reg('https://fcm.googleapis.com/guest'), sessionGuest(['s1']));
+    transition(n, 's1');
+    transition(n, 'sibling');
+    await settle();
+    assert.deepEqual(
+      rec.calls.map((c) => (c.payload as { sessionId: string }).sessionId),
+      ['s1'],
+    );
+  });
+
+  test('guestMayPush mirrors the per-session reach', () => {
+    const machine = { ...reg(), guest: machineGuest() };
+    const scoped = { ...reg(), guest: sessionGuest(['s1']) };
+    assert.equal(guestMayPush(machine, 'anything'), true);
+    assert.equal(guestMayPush(scoped, 's1'), true);
+    assert.equal(guestMayPush(scoped, 's2'), false);
+  });
+
+  test('owner pushes still go to every session alongside guest rows', async () => {
+    const rec = recorder();
+    const n = new PushNotifier(memStore([reg('https://fcm.googleapis.com/owner')]), rec.send);
+    n.registerGuest(reg('https://fcm.googleapis.com/guest'), sessionGuest(['s1']));
+    transition(n, 's2');
+    await settle();
+    assert.deepEqual(rec.calls.map((c) => c.endpoint), ['https://fcm.googleapis.com/owner']);
+  });
+
+  test('dropGuestGrants removes matching rows and leaves the rest', () => {
+    const store = memStore([reg('https://fcm.googleapis.com/owner')]);
+    const n = new PushNotifier(store, recorder().send);
+    n.registerGuest(reg('https://fcm.googleapis.com/a'), machineGuest({ grantIds: ['g1', 'g2'] }));
+    n.registerGuest(reg('https://fcm.googleapis.com/b'), sessionGuest(['s1'], { grantIds: ['g3'] }));
+    n.dropGuestGrants(new Set(['g2']));
+    assert.deepEqual(
+      n.guestRegistrations.map((r) => r.subscription.endpoint),
+      ['https://fcm.googleapis.com/b'],
+    );
+    assert.equal(store.guestRows.length, 1);
+    assert.equal(n.registrations.length, 1);
+    assert.equal(store.saves, 0);
+  });
+
+  test("a guest registering the owner's endpoint leaves the owner row alone", () => {
+    const owner = reg('https://fcm.googleapis.com/shared');
+    const store = memStore([owner]);
+    const n = new PushNotifier(store, recorder().send);
+    const theirs = reg('https://fcm.googleapis.com/shared');
+    theirs.vapid.publicKey = b64(65, 9);
+    assert.equal(n.registerGuest(theirs, machineGuest()), true);
+    assert.deepEqual(n.registrations, [owner]);
+    assert.equal(store.saves, 0);
+    assert.equal(n.guestRegistrations.length, 1);
+  });
+
+  test('a device that is both an owner and a guest row is pushed once', async () => {
+    const rec = recorder();
+    const n = new PushNotifier(memStore([reg('https://fcm.googleapis.com/shared')]), rec.send);
+    n.registerGuest(reg('https://fcm.googleapis.com/shared'), machineGuest());
+    transition(n, 's1');
+    await settle();
+    assert.equal(rec.calls.length, 1);
+  });
+
+  test('an identical guest re-register does not rewrite the file', () => {
+    const store = memStore();
+    const n = new PushNotifier(store, recorder().send);
+    n.registerGuest(reg(), machineGuest());
+    n.registerGuest(reg(), machineGuest());
+    assert.equal(store.guestSaves, 1);
+  });
+
+  test('the per-guest cap evicts that guest’s oldest row only', () => {
+    const n = new PushNotifier(memStore(), recorder().send);
+    n.registerGuest(reg('https://fcm.googleapis.com/other'), sessionGuest(['s1']));
+    for (let i = 0; i <= GUEST_PUSH_CAP; i++) {
+      n.registerGuest(reg(`https://fcm.googleapis.com/a${i}`), machineGuest());
+    }
+    const endpoints = n.guestRegistrations.map((r) => r.subscription.endpoint);
+    assert.equal(endpoints.filter((e) => e.includes('/a')).length, GUEST_PUSH_CAP);
+    assert.equal(endpoints.includes('https://fcm.googleapis.com/a0'), false);
+    assert.equal(endpoints.includes(`https://fcm.googleapis.com/a${GUEST_PUSH_CAP}`), true);
+    assert.equal(endpoints.includes('https://fcm.googleapis.com/other'), true);
+  });
+
+  test("unregisterGuest cannot remove another guest's or the owner's row", () => {
+    const n = new PushNotifier(memStore([reg('https://fcm.googleapis.com/owner')]), recorder().send);
+    n.registerGuest(reg('https://fcm.googleapis.com/b'), sessionGuest(['s1']));
+    n.unregisterGuest('https://fcm.googleapis.com/owner', 'guest-a');
+    n.unregisterGuest('https://fcm.googleapis.com/b', 'guest-a');
+    assert.equal(n.registrations.length, 1);
+    assert.equal(n.guestRegistrations.length, 1);
+    n.unregisterGuest('https://fcm.googleapis.com/b', 'guest-b');
+    assert.equal(n.guestRegistrations.length, 0);
+  });
+
+  test('a 410 on a guest row removes it from the guest list only', async () => {
+    const store = memStore([reg('https://fcm.googleapis.com/owner')]);
+    const rec = recorder();
+    const send = (r: PushRegistration, payload: string) =>
+      r.subscription.endpoint.endsWith('/guest')
+        ? Promise.reject(Object.assign(new Error('Gone'), { statusCode: 410 }))
+        : rec.send(r, payload);
+    const n = new PushNotifier(store, send);
+    n.registerGuest(reg('https://fcm.googleapis.com/guest'), machineGuest());
+    transition(n, 's1');
+    await settle();
+    assert.equal(n.guestRegistrations.length, 0);
+    assert.equal(n.registrations.length, 1);
+    assert.equal(store.saves, 0);
+  });
+
+  test('the allowlist still refuses a bad endpoint from a guest', () => {
+    const store = memStore();
+    const n = new PushNotifier(store, recorder().send);
+    assert.equal(n.registerGuest(reg('https://10.0.0.5/push'), machineGuest()), false);
+    assert.equal(n.guestRegistrations.length, 0);
+    assert.equal(store.guestSaves, 0);
+  });
+
+  test('a muted session is silent for guests too', async () => {
+    const rec = recorder();
+    const n = new PushNotifier(memStore(), rec.send);
+    n.isMuted = () => true;
+    n.registerGuest(reg(), machineGuest());
+    transition(n, 's1');
+    await settle();
+    assert.equal(rec.calls.length, 0);
+  });
+
+  test('drops guest rows on disk without a usable reach', () => {
+    const n = new PushNotifier(
+      memStore([], [
+        { ...reg('https://fcm.googleapis.com/ok'), guest: machineGuest() },
+        { ...reg('https://fcm.googleapis.com/nogrant'), guest: machineGuest({ grantIds: [] }) },
+        { ...reg('https://fcm.googleapis.com/nolist'), guest: { userId: 'x', grantIds: ['g'], scope: 'session' } },
+      ]),
+      recorder().send,
+    );
+    assert.deepEqual(
+      n.guestRegistrations.map((r) => r.subscription.endpoint),
+      ['https://fcm.googleapis.com/ok'],
+    );
   });
 });
 

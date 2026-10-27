@@ -531,6 +531,21 @@ export interface PushRegistration {
   vapid: VapidKeyPair;
 }
 
+/**
+ * A guest's device, subscribed to a host's machine. Carries the reach of the
+ * socket that registered it, so the bridge pushes only for sessions that guest
+ * could already see, and the grants behind that reach, so revoking or changing
+ * one drops the row. Kept in its own file, never mixed with owner rows.
+ */
+export type GuestPushRegistration = PushRegistration & {
+  guest: {
+    userId: string;
+    grantIds: string[];
+    scope: 'machine' | 'session';
+    sessionIds?: string[];
+  };
+};
+
 /** What the bridge pushes and `sw.js` shows. Kept minimal — no transcript text. */
 export interface PushPayload {
   sessionId: string;
@@ -2473,11 +2488,13 @@ export const MESSAGE_AUTHZ: Record<ClientMessage['type'], MessageAuthz> = {
   transcribe: { needs: 'cap', cap: 'prompt' },
   // Writes a 148 MB file into the host's app folder. Owner only, permanently.
   installWhisperModel: { needs: 'owner' },
-  // Push alerts cover every session on the machine, so only its owner may
-  // subscribe — a guest subscription would leak sessions the grant hides. The
-  // bridge also POSTs to the supplied endpoint, which is a second reason.
-  registerPush: { needs: 'owner' },
-  unregisterPush: { needs: 'owner' },
+  // Every connection may subscribe; the handler branches on access. An owner
+  // row covers every session on the machine. A guest row is stored apart,
+  // carries the socket's reach and is pushed only for sessions inside it, and is
+  // dropped when a grant behind it is revoked or changed. The supplied endpoint
+  // passes the same push-service allowlist either way.
+  registerPush: { needs: 'connection' },
+  unregisterPush: { needs: 'connection' },
   // Creates sessions *and* workflows from the owner's library — wider than
   // createSession, so no preset reaches it.
   runRecipe: { needs: 'owner' },
@@ -4011,7 +4028,8 @@ export type ServerMessage =
       /** Whether this user has a TypeSafe key saved on this machine, so smart
        *  routing can run. Owner only; absent from a bridge older than this field. */
       smartRoutingAvailable?: boolean;
-      /** This bridge understands `registerPush`/`unregisterPush`. Owner only;
+      /** This bridge understands `registerPush`/`unregisterPush` on this link.
+       *  Sent to owners and guests (a guest's pushes are scoped to their grant);
        *  absent from a bridge older than this field, which the client then
        *  leaves alone rather than drawing an "action not available" error. */
       pushAvailable?: boolean;

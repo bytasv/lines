@@ -10,6 +10,7 @@ import type {
   MemoryReviewEntry,
   Project,
   ProjectKeyMap,
+  GuestPushRegistration,
   PushRegistration,
   RecipeDef,
   SessionMeta,
@@ -352,6 +353,11 @@ export function createStore(root: string, options: { sharedRoot?: string } = {})
   // the device minted. Bridge-local, never synced, 0600: the private keys sign
   // pushes to those devices.
   const PUSH_SUBSCRIPTIONS_FILE = path.join(root, 'push-subscriptions.json');
+  // Guests' devices subscribed to this user's machine, each with the reach it
+  // may be pushed for. A separate file so an older bridge, which reads only the
+  // one above, never treats a guest row as an owner row and pushes it every
+  // session. 0600 for the same reason.
+  const PUSH_GUEST_SUBSCRIPTIONS_FILE = path.join(root, 'push-guest-subscriptions.json');
   const MEMORY_MANIFEST_FILE = path.join(root, 'memory-manifest.json');
   // Staged remote memory writes plus the last rejection, kept out of the
   // manifest for the same reason the guard's two files are split: the manifest
@@ -829,6 +835,21 @@ export function createStore(root: string, options: { sharedRoot?: string } = {})
       fs.writeFileSync(PUSH_SUBSCRIPTIONS_FILE, JSON.stringify(rows, null, 2), { mode: 0o600 });
       try {
         fs.chmodSync(PUSH_SUBSCRIPTIONS_FILE, 0o600);
+      } catch {
+        // best-effort on platforms without POSIX perms
+      }
+    },
+
+    /** Same contract as loadPushSubscriptions; rows are validated by PushNotifier. */
+    loadGuestPushSubscriptions(): GuestPushRegistration[] {
+      const raw = readJson<unknown>(PUSH_GUEST_SUBSCRIPTIONS_FILE, []);
+      return Array.isArray(raw) ? (raw as GuestPushRegistration[]) : [];
+    },
+
+    saveGuestPushSubscriptions(rows: GuestPushRegistration[]) {
+      fs.writeFileSync(PUSH_GUEST_SUBSCRIPTIONS_FILE, JSON.stringify(rows, null, 2), { mode: 0o600 });
+      try {
+        fs.chmodSync(PUSH_GUEST_SUBSCRIPTIONS_FILE, 0o600);
       } catch {
         // best-effort on platforms without POSIX perms
       }

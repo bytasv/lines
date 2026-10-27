@@ -704,7 +704,7 @@ function withSeen(seen: Set<string>, ids: string[]): Set<string> {
   return next;
 }
 
-/** Owned machines whose bridge accepts push registration. */
+/** Machines, owned or shared with this user, whose bridge accepts push registration. */
 function pushMachines(state: { machines: Record<string, MachineSlice> }): string[] {
   return Object.values(state.machines)
     .filter((m) => m.push)
@@ -712,9 +712,10 @@ function pushMachines(state: { machines: Record<string, MachineSlice> }): string
 }
 
 /**
- * Hand this device's push subscription to each machine. Every owned machine, not
- * only the primary: each bridge pushes for the sessions it hosts, the same
- * "not scoped to the machine in front of you" rule `maybeAlert` follows.
+ * Hand this device's push subscription to each machine. Every machine, not only
+ * the primary: each bridge pushes for the sessions it hosts, the same "not
+ * scoped to the machine in front of you" rule `maybeAlert` follows. A guest link
+ * registers too; that bridge pushes only for the sessions the grant reaches.
  */
 async function registerPushWith(deviceIds: string[]): Promise<void> {
   if (!deviceIds.length) return;
@@ -2398,8 +2399,8 @@ export const useStore = create<UiState>((set, get) => {
             // Same fail-closed reading as `local`: absent means "no evidence of
             // encryption", which is what an older bridge honestly offers.
             encrypted: msg.encrypted ?? false,
-            // Owner links only: a guest may not subscribe, and the bridge says so.
-            push: !msg.access && msg.pushAvailable === true,
+            // Guest links too: the bridge scopes a guest's pushes to their grant.
+            push: msg.pushAvailable === true,
             view,
           };
           return {
@@ -2561,7 +2562,7 @@ export const useStore = create<UiState>((set, get) => {
           else delete guestLayouts[from];
           set({ guestLayouts });
         }
-        // Every owner hello, not just the first: `registerPush` is an idempotent
+        // Every hello, not just the first: `registerPush` is an idempotent
         // upsert, and this is how a newly linked machine — or one whose file was
         // lost — picks up this device's subscription.
         if (get().alertsEnabled && get().machines[from]?.push) void registerPushWith([from]);

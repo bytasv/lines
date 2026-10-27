@@ -1232,6 +1232,9 @@ function buildHello(
       // Unlike `claudeCli`, a guest is told: their dictation is transcribed on
       // this machine, so whether they get a mic button is this machine's answer.
       whisper: publicWhisperStatus(),
+      // A guest may subscribe too; their pushes are scoped to this same reach
+      // (see registerPush).
+      pushAvailable: true,
       // Always false in practice — a guest arrives over the relay — but sent
       // rather than omitted so the client reads one rule for every link.
       local,
@@ -1299,7 +1302,7 @@ function buildHello(
     // Owner-only like `settings`: whether this user has a TypeSafe key saved on
     // this machine, for the Settings pane. Never the key itself.
     smartRoutingAvailable: ctx.store.loadTypesafeKey() !== null,
-    // Owner-only like `settings`: a guest may not subscribe (see MESSAGE_AUTHZ).
+    // A guest gets this too, scoped to their reach (see registerPush).
     pushAvailable: true,
     // Whether this link may drive a dialog that opens on this machine's screen.
     local,
@@ -1430,9 +1433,12 @@ async function handleMcpToolRpcImpl(ctx: UserContext, rpc: WorkerRpc): Promise<v
   worker.rpcResult(rpc.id, result);
 }
 
-/** Close every guest socket of this context admitted on any of these grants. */
+/** Close every guest socket of this context admitted on any of these grants, and
+ *  drop the guest push rows registered under them: a changed grant re-registers
+ *  with its new reach when the guest reconnects. */
 function closeGuestSockets(ctx: UserContext, grantIds: Set<string>, reason: string): void {
   if (!grantIds.size) return;
+  ctx.pushNotifier.dropGuestGrants(grantIds);
   for (const link of ctx.sockets.keys()) {
     if (conns.get(link)?.grantIds?.some((id) => grantIds.has(id))) link.close(1008, reason);
   }
@@ -1915,10 +1921,26 @@ async function handleMessageImpl(ctx: UserContext, ws: BrowserLink, msg: ClientM
       );
       break;
     }
-    case 'registerPush':
+    case 'registerPush': {
       // Refused rather than stored when the endpoint is not a known push service
       // or a key is malformed: the bridge POSTs to that URL on every alert.
-      if (!ctx.pushNotifier.register({ subscription: msg.subscription, vapid: msg.vapid })) {
+      // A guest's row carries this socket's reach (already narrowed at admission)
+      // and the grants behind it, so it is pushed only for sessions they can see
+      // and dropped with those grants (see closeGuestSockets).
+      const conn = conns.get(ws);
+      if (!conn) break;
+      const reg = { subscription: msg.subscription, vapid: msg.vapid };
+      const { access } = conn;
+      const ok =
+        access.scope === 'owner'
+          ? ctx.pushNotifier.register(reg)
+          : ctx.pushNotifier.registerGuest(reg, {
+              userId: conn.userId,
+              grantIds: conn.grantIds ?? [],
+              scope: access.scope,
+              ...(access.sessionIds ? { sessionIds: access.sessionIds } : {}),
+            });
+      if (!ok) {
         ws.send(
           JSON.stringify({
             type: 'error',
@@ -1927,9 +1949,15 @@ async function handleMessageImpl(ctx: UserContext, ws: BrowserLink, msg: ClientM
         );
       }
       break;
-    case 'unregisterPush':
-      ctx.pushNotifier.unregister(msg.endpoint);
+    }
+    case 'unregisterPush': {
+      const conn = conns.get(ws);
+      if (!conn) break;
+      // A guest removes only their own row, never the owner's or another guest's.
+      if (conn.access.scope === 'owner') ctx.pushNotifier.unregister(msg.endpoint);
+      else ctx.pushNotifier.unregisterGuest(msg.endpoint, conn.userId);
       break;
+    }
     case 'installWhisperModel':
       // Fire and forget: progress and the outcome are broadcast (see
       // onWhisperModelDownload below), so a second tab watches the same bar.
