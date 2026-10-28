@@ -378,5 +378,7 @@
       ]
     }
   ],
-  "desktopPending": []
+  "desktopPending": [
+    "Editing a workflow no longer shifts the steps of sessions already running it: a session keeps the steps it started with, and your changes apply to new sessions."
+  ]
 }

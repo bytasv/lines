@@ -49,13 +49,15 @@ export function guestLibrary(ctx: UserContext, access: SocketAccess, sessions: S
       pinnedSteps: ctx.workflows.listPinnedSteps(),
     };
   }
-  // An inline snapshot carries its own steps; only library-backed runs need the row.
+  // A snapshot carries its own step list; only legacy library-backed runs need the row.
   const ids = new Set(sessions.filter((s) => s.workflow && !s.workflow.def).map((s) => s.workflow!.workflowId));
-  if (!ids.size) return EMPTY_LIBRARY;
-  const workflows = ctx.workflows.list().filter((w) => ids.has(w.id));
-  const sharedWorkflows = ctx.workflows.listShared().filter((w) => ids.has(w.id));
+  // A library snapshot keeps its pinned steps as refs, so those versions are still needed.
+  const defs = sessions.flatMap((s) => (s.workflow?.def ? [s.workflow.def] : []));
+  const workflows = ids.size ? ctx.workflows.list().filter((w) => ids.has(w.id)) : [];
+  const sharedWorkflows = ids.size ? ctx.workflows.listShared().filter((w) => ids.has(w.id)) : [];
   // Just the step versions those workflows pin, so their refs resolve.
-  const refs = [...workflows, ...sharedWorkflows].flatMap((w) => w.steps.filter(isStepRef));
+  const refs = [...workflows, ...sharedWorkflows, ...defs].flatMap((w) => w.steps.filter(isStepRef));
+  if (!workflows.length && !sharedWorkflows.length && !refs.length) return EMPTY_LIBRARY;
   const pinned = (s: StepDef) =>
     refs.some((r) => r.ownerId === s.ownerId && r.stepId === s.id && r.version === s.version);
   return {

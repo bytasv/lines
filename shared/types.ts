@@ -1032,9 +1032,11 @@ export interface WorkflowState {
    *  Approve button's loader. In-flight only — never trusted across a bridge
    *  restart or an instance hand-off. */
   advancing?: boolean;
-  /** Self-contained snapshot of the workflow, every step inline. Set when the
-   *  workflow came from outside this machine's library (a guest's own workflow);
-   *  wins over `workflowId` when resolving the definition. */
+  /** Snapshot of the workflow the session follows; wins over `workflowId` when
+   *  resolving the definition. Set on every attach: a library workflow's frozen
+   *  copy taken at attach time (pinned steps stay refs — their versions are
+   *  immutable), or a guest's own workflow with every step inline. Absent only on
+   *  sessions attached before snapshots, which still resolve the live row. */
   def?: WorkflowDef;
   /** Current step's configured permission mode, snapshotted at step start.
    *  Distinguishes a workflow-mandated 'plan' from a manual mid-step override. */

@@ -344,6 +344,9 @@ The web draft/editor side (`useWorkflowDraft.ts`, `WorkflowEditor.tsx`, `StepCar
   refused. Edits and copies (Duplicate, "Make an editable copy") never clear a mark. The review
   dialog freezes what it shows when it opens: content that changes while it is open is refused by
   the bridge rather than re-rendered and confirmed unseen.
+- "Update all" and a single re-pin change only the library row. A session already attached keeps
+  the pins it froze at attach (see [workflow-step-lifecycle](workflow-step-lifecycle.md#business-rules)),
+  so the new pin reaches only sessions attached after it.
 - Workflow re-pin changes only which immutable version a ref points to (metadata only, same
   immutable content, different pointer); step-library restore creates a brand-new head version
   with old content — it is not a rewrite of history, and history is never rewritten.

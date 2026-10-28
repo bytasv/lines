@@ -519,7 +519,8 @@ export class WorkflowEngine {
       const state = s.workflow;
       return (
         state?.workflowId === workflowId &&
-        // An inline snapshot runs its own copy, untouched by a pull of this id.
+        // A snapshot (every attach since sessions froze their workflow) runs its
+        // own copy, untouched by a pull of this id — only legacy sessions are left.
         !state.def &&
         state.started &&
         state.stepStatuses.some((status) => status !== 'done')
@@ -558,8 +559,9 @@ export class WorkflowEngine {
   }
 
   /**
-   * The definition a session's run follows: its inline snapshot when it carries
-   * one (a guest's own workflow, absent from this library), else the library row.
+   * The definition a session's run follows: its snapshot when it carries one (the
+   * library row frozen at attach, or a guest's own workflow absent from this
+   * library), else — for sessions attached before snapshots — the live library row.
    */
   private resolveFor(state: WorkflowState): WorkflowDef | undefined {
     return state.def ?? this.resolve(state.workflowId);
@@ -1147,13 +1149,28 @@ export class WorkflowEngine {
     const wf = this.resolve(workflowId);
     if (!wf) return;
     if (this.untrustedParts(wf).length > 0) throw new UntrustedWorkflowError(wf.name);
-    this.attachDef(sessionId, wf, undefined, stepOverrides);
+    this.attachDef(sessionId, wf, this.snapshotOf(wf), stepOverrides);
+  }
+
+  /**
+   * The frozen copy a library attach rides on `meta.workflow.def`, so a later
+   * edit to the row (a step inserted, say) never renumbers this run's steps.
+   *
+   * Taken only after `untrustedParts` passed, and without the row's mark: a
+   * provenance-only one (`held: false`) would read as unverified in
+   * `unverifiedRefusal`, which tests `def.untrusted` for truthiness. Step refs
+   * stay refs — a pinned version is immutable, and the per-step trust gate
+   * still checks it on every run.
+   */
+  private snapshotOf(wf: WorkflowDef): WorkflowDef {
+    return { ...unmarked(wf), steps: [...wf.steps] };
   }
 
   /**
    * Attach a self-contained workflow that is not in this library — a guest's own,
-   * every step already inline. The snapshot rides `meta.workflow.def`, so it
-   * persists with the session and survives a bridge restart.
+   * every step already inline. The snapshot rides `meta.workflow.def` like a
+   * library attach's frozen copy, so it persists with the session and survives a
+   * bridge restart.
    */
   attachInline(sessionId: string, def: WorkflowDef, stepOverrides?: unknown) {
     this.attachDef(sessionId, def, def, stepOverrides);
@@ -1524,12 +1541,15 @@ export class WorkflowEngine {
     // machine did not already hold. Any mark refuses it, strict or not: a session
     // row is never signed, so there is nothing a recovery switch could vouch for,
     // and nothing in the library to review it from.
-    if (state.def) {
-      return state.def.untrusted
-        ? 'this session’s workflow came from another machine through cloud sync, and this machine has ' +
-            'not verified it. Start a new session with a workflow from your library instead.'
-        : undefined;
+    if (state.def?.untrusted) {
+      return (
+        'this session’s workflow came from another machine through cloud sync, and this machine has ' +
+        'not verified it. Start a new session with a workflow from your library instead.'
+      );
     }
+    // Otherwise `wf` is the snapshot (or, for a legacy session, the live row). A
+    // snapshot's pinned refs still resolve against this machine's step versions,
+    // so one marked held since the attach is refused here like any other.
     const label = isHeld(wf)
       ? `“${wf.name}”`
       : isStepRef(step) && isHeld(this.stepVersions.get(stepKey(step.ownerId, step.stepId, step.version)) ?? {})

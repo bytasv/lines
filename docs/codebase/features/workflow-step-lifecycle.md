@@ -85,6 +85,7 @@ reads as "done" without opening the session.
 - `SessionManager.TurnCompleteListener` (`interrupted` third argument)
 - `WorkflowEngine.reopenParkedStep` (parked step back to `running`)
 - `SessionManager.setTurnResumedListener` / `TurnResumedListener`
+- `WorkflowEngine.snapshotOf` (frozen copy of a library row taken at attach)
 - `provesMainThreadTurn` (which events prove a main-thread turn)
 - `SessionManager.settleStoppedTurn` (settle a Stop whose query closed)
 - `SessionManager.consolidateStepOutput`
@@ -467,6 +468,9 @@ installed icon, no new package). No other new dependencies.
 
 ## Tests
 
+- `server/src/workflows.snapshot.test.ts` — an attached session keeps its frozen step list after a
+  library edit; a snapshot ignores a provenance-only mark; a pinned ref held back after attach is
+  refused; a session without `def` still resolves the live row.
 - `server/src/workflows.advance.test.ts` — Stop does not flag an advance (and does not arm
   the watchdog); a stopped step parks on the SDK result and on `ended`-without-result, both when
   the result reports `subtype: 'success'` and when it reports the SDK's actual interrupt shape
@@ -646,6 +650,13 @@ installed icon, no new package). No other new dependencies.
   it self-invalidates once `stepIndex` moves on — advance, rewind and fresh start never clear it.
   Only effect: later parks of that step do not alert (see
   [web-push-notifications](web-push-notifications.md)).
+- A session runs and displays the workflow as it was when attached: `attach` freezes a copy of
+  the library row onto `WorkflowState.def`, so later library edits (a step inserted, reordered or
+  re-pinned) reach only sessions attached after the edit. Sessions attached before this rule carry
+  no `def` and keep resolving the live row, so an edit can still shift their stepper. Pinned steps
+  stay refs in the snapshot, so a pinned version held back after attach is still refused before
+  its step runs. A snapshot synced to another machine is held there until reviewed, so its steps
+  do not run on that machine.
 - The transcript renders only three workflow-marker events: `started`, a failure park
   (`waiting-approval` with `failed` or `missingOutputs`), and `workflow-done`. Every
   other event this engine emits (`waiting-approval` with neither flag, `approved`,
