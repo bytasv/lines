@@ -18,3 +18,9 @@ For repository context, always start with:
 Do not read the entire documentation directory or repository unless necessary.
 
 Clearly report assumptions, failed checks, and unresolved uncertainty.
+
+## Before committing
+
+The `.githooks/pre-commit` hook runs the typecheck and the docs validation; that is the baseline gate.
+
+For UI changes, the minimal check is the typecheck plus the unit specs of the touched workspace. End-to-end and browser checks are optional and need the dev stack running; do not start it just to satisfy a commit. Say in the commit report which checks ran and which did not.
