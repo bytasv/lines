@@ -230,6 +230,14 @@
   ],
   "desktop": [
     {
+      "version": "0.2.64",
+      "date": "2026-10-28",
+      "items": [
+        "Guests on a shared machine now get alerts on their phone when the app is in the background, for the sessions their access covers.",
+        "Dictation runs longer: it starts with 2 minutes, and a \"+2 min\" button appears in the last 30 seconds to extend it, up to 10 minutes."
+      ]
+    },
+    {
       "version": "0.2.63",
       "date": "2026-10-26",
       "items": [
@@ -370,8 +378,5 @@
       ]
     }
   ],
-  "desktopPending": [
-    "Guests on a shared machine now get alerts on their phone when the app is in the background, for the sessions their access covers.",
-    "Dictation runs longer: it starts with 2 minutes, and a \"+2 min\" button appears in the last 30 seconds to extend it, up to 10 minutes."
-  ]
+  "desktopPending": []
 }
