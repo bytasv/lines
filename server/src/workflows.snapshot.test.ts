@@ -42,13 +42,20 @@ function harness() {
   const broadcast = (_m: ServerMessage) => {};
   const sessions = new SessionManager(store, new GuardAllowlist(store), broadcast);
   sessions.attachWorker({
-    push: (msg: { text?: string }) => prompts.push(String(msg?.text ?? '')),
+    push: () => {},
     close: () => {},
     interrupt: () => {},
     setModel: () => {},
     setPermissionMode: () => {},
     rpcResult: () => {},
   } as unknown as WorkerClient);
+  // What each step sends: worker.push takes the session id first, so a mock of
+  // it would see no prompt text.
+  const realPrompt = sessions.prompt.bind(sessions);
+  sessions.prompt = ((id: string, text: string, ...rest: unknown[]) => {
+    prompts.push(text);
+    return realPrompt(id, text, ...(rest as []));
+  }) as typeof sessions.prompt;
   const workflows = new WorkflowEngine(store, sessions, broadcast, USER);
   const recipes = new RecipeEngine(store, broadcast, USER);
   const ctx = { userId: USER, store, sessions, workflows, recipes, broadcast } as unknown as UserContext;
