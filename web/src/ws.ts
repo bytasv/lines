@@ -9,7 +9,7 @@ import type {
   ServerMessage,
   SharePreset,
 } from '@lines/shared';
-import { APP_PROTOCOL_VERSION, enrollProof, startHandshake } from '@lines/shared';
+import { APP_PROTOCOL_VERSION, enrollProof, startHandshake, transcribeBudgetMs } from '@lines/shared';
 import { useStore } from './store';
 import { refreshDevices } from './lib/devices';
 import { cryptoUnavailable, deviceIdentity, guestGrantTokens, pinKey, pinnedKey } from './lib/e2ee';
@@ -576,9 +576,13 @@ export async function mintGuestGrant(
   });
 }
 
-/** Longer than the bridge's own whisper timeout plus a full queue ahead of it,
- *  so the bridge's answer — which says *why* — normally arrives first. */
-const TRANSCRIBE_DEADLINE_MS = 180_000;
+/** Longer than the bridge's own whisper budget for this audio, plus room for a
+ *  job queued ahead of it and the round trip, so the bridge's answer — which
+ *  says *why* — normally arrives first. Sized off the decoded length, the same
+ *  estimate the bridge makes. */
+function transcribeDeadlineMs(audio: string): number {
+  return transcribeBudgetMs(Math.floor((audio.length * 3) / 4)) + 60_000;
+}
 
 /**
  * Send dictated audio (raw base64 WAV) to a machine's whisper.cpp and resolve
@@ -603,7 +607,7 @@ export function transcribeAudio(
     const timer = setTimeout(() => {
       link.transcriptions.delete(requestId);
       reject(new Error('Transcription timed out.'));
-    }, TRANSCRIBE_DEADLINE_MS);
+    }, transcribeDeadlineMs(audio));
     link.transcriptions.set(requestId, {
       resolve: (text) => {
         clearTimeout(timer);

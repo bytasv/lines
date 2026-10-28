@@ -80,7 +80,7 @@ import { MentionInput, spliceTranscript, type MentionInputHandle } from './Menti
 import { VoiceWaveform } from './VoiceWaveform';
 import { send } from '../ws';
 import { formatElapsed, useVoiceDictation } from '../lib/useVoiceDictation';
-import { DictateButton } from './DictateButton';
+import { DictateButton, VoiceLimitNotice } from './DictateButton';
 import { useIsPhone } from '../lib/layout';
 
 /** Read a File into a raw-base64 PromptAttachment (strips the data: URI prefix). */
@@ -880,9 +880,15 @@ export function Composer({ session }: { session: SessionMeta }) {
               <Box style={{ flex: 1, minWidth: 0 }} c="dimmed">
                 <VoiceWaveform level={voiceLevel} height={isPhone ? 24 : 32} />
               </Box>
-              <Text size="xs" c="dimmed" style={{ fontVariantNumeric: 'tabular-nums' }}>
-                {formatElapsed(dictation.elapsed)}
-              </Text>
+              {/* Near the limit the timer gives way to the countdown and its
+                  "+2 min"; pressing it must not take focus off the textarea. */}
+              {dictation.remainingMs !== null ? (
+                <VoiceLimitNotice dictation={dictation} keepFocus />
+              ) : (
+                <Text size="xs" c="dimmed" style={{ fontVariantNumeric: 'tabular-nums' }}>
+                  {formatElapsed(dictation.elapsed)}
+                </Text>
+              )}
             </Group>
           </Paper>
         )}

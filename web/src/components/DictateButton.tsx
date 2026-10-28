@@ -1,6 +1,7 @@
 import { useState } from 'react';
-import { ActionIcon, Group, Text, ThemeIcon, Tooltip } from '@mantine/core';
-import { IconAlertTriangle, IconCheck, IconMicrophone, IconX } from '@tabler/icons-react';
+import { ActionIcon, Button, Group, Text, ThemeIcon, Tooltip } from '@mantine/core';
+import { IconAlertTriangle, IconCheck, IconMicrophone, IconPlus, IconX } from '@tabler/icons-react';
+import { VOICE_EXTEND_SECONDS, VOICE_MAX_SECONDS } from '@lines/shared';
 import { formatElapsed, type VoiceDictation } from '../lib/useVoiceDictation';
 
 /**
@@ -39,15 +40,28 @@ export function DictateButton({
   /** The warning dot only shows on hover: a mic that is never set up would
    *  otherwise wear an orange badge in every composer, forever. */
   const [micHovered, setMicHovered] = useState(false);
-  const pressProps = keepFocus
-    ? { onMouseDown: (e: React.MouseEvent) => e.preventDefault(), 'data-plan-chrome': true }
-    : {};
+  const pressProps = focusProps(keepFocus);
+  const nearLimit = voice === 'recording' && dictation.remainingMs !== null;
   return (
     <Group gap={4} wrap="nowrap" data-dictate>
       {showTimer && voice === 'recording' && (
-        <Text size="xs" c="dimmed" style={{ fontVariantNumeric: 'tabular-nums' }}>
+        <Text size="xs" c={nearLimit ? 'orange' : 'dimmed'} style={{ fontVariantNumeric: 'tabular-nums' }}>
           {formatElapsed(dictation.elapsed)}
         </Text>
+      )}
+      {showTimer && nearLimit && dictation.canExtend && (
+        <Tooltip label={`Recording ends in ${formatRemaining(dictation.remainingMs ?? 0)} — add ${extendLabel}`}>
+          <ActionIcon
+            variant="subtle"
+            color="orange"
+            size={size}
+            aria-label={`Add ${extendLabel}`}
+            onClick={dictation.extend}
+            {...pressProps}
+          >
+            <IconPlus size={iconSize} />
+          </ActionIcon>
+        </Tooltip>
       )}
       {/* Beside the check, not in the overlay: finish and discard are one
           decision, so they sit together under the same thumb. */}
@@ -139,7 +153,43 @@ export function DictateButton({
 /** Room a field's right section needs for the button (and timer) right now. */
 export function dictateSectionWidth(dictation: VoiceDictation, showTimer?: boolean): number {
   if (dictation.voice !== 'recording') return 30;
-  return showTimer ? 96 : 60;
+  if (!showTimer) return 60;
+  return dictation.remainingMs !== null && dictation.canExtend ? 124 : 96;
+}
+
+const extendLabel = `${VOICE_EXTEND_SECONDS / 60} min`;
+
+/** Press props that leave focus (and the card's selection logic) alone. */
+function focusProps(keepFocus?: boolean) {
+  return keepFocus
+    ? { onMouseDown: (e: React.MouseEvent) => e.preventDefault(), 'data-plan-chrome': true }
+    : {};
+}
+
+/** Countdown `m:ss`, rounded up so it reads 0:01 rather than 0:00 until the end. */
+function formatRemaining(ms: number): string {
+  return formatElapsed(Math.ceil(ms / 1000) * 1000);
+}
+
+/**
+ * The end-of-recording warning: how long is left and a "+2 min" to push the
+ * limit out, until the ceiling. Renders only inside the warning window.
+ */
+export function VoiceLimitNotice({ dictation, keepFocus }: { dictation: VoiceDictation; keepFocus?: boolean }) {
+  if (dictation.remainingMs === null) return null;
+  const left = formatRemaining(dictation.remainingMs);
+  return (
+    <Group gap={6} wrap="nowrap">
+      <Text size="xs" c="orange" style={{ fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>
+        {dictation.canExtend ? `Ends in ${left}` : `Recording ends in ${left} (${VOICE_MAX_SECONDS / 60} min max)`}
+      </Text>
+      {dictation.canExtend && (
+        <Button size="compact-xs" variant="light" color="orange" onClick={dictation.extend} {...focusProps(keepFocus)}>
+          +{extendLabel}
+        </Button>
+      )}
+    </Group>
+  );
 }
 
 /** A card field's dictation error, under the field; a click dismisses it. */

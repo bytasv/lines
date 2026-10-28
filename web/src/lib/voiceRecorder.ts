@@ -6,7 +6,7 @@
  * context runs at the device's own rate — Firefox refuses to connect a mic to an
  * AudioContext at any other — and the samples are downsampled once, at the end.
  */
-import { VOICE_MAX_SECONDS } from '@lines/shared';
+import { extendVoiceLimit, VOICE_INITIAL_SECONDS } from '@lines/shared';
 
 const TARGET_RATE = 16_000;
 
@@ -29,12 +29,16 @@ export interface VoiceRecording {
   /** Loudness right now, 0..1 — RMS of the latest analyser frame, for the
    *  waveform. Cheap enough to call every animation frame. */
   level: () => number;
+  /** Push the limit out by one extend (capped at the ceiling) and return it in
+   *  seconds. Does nothing once the limit has already stopped capture. */
+  extend: () => number;
 }
 
 /**
  * Start recording. Rejects when the mic is refused or absent. `onLimit` fires
- * once when {@link VOICE_MAX_SECONDS} is reached; capture has stopped by then,
- * and the caller is expected to `stop()`.
+ * once when the current limit is reached — {@link VOICE_INITIAL_SECONDS}, or
+ * later after `extend()`; capture has stopped by then, and the caller is
+ * expected to `stop()`.
  */
 export async function startVoiceRecording({ onLimit }: { onLimit: () => void }): Promise<VoiceRecording> {
   const stream = await navigator.mediaDevices.getUserMedia({
@@ -46,7 +50,8 @@ export async function startVoiceRecording({ onLimit }: { onLimit: () => void }):
   // served beside the bundle. The buffer size only sets callback granularity.
   const processor = ctx.createScriptProcessor(4096, 1, 1);
   const chunks: Float32Array[] = [];
-  const maxSamples = VOICE_MAX_SECONDS * ctx.sampleRate;
+  let limitSeconds = VOICE_INITIAL_SECONDS;
+  let maxSamples = limitSeconds * ctx.sampleRate;
   let captured = 0;
   let limited = false;
 
@@ -93,6 +98,12 @@ export async function startVoiceRecording({ onLimit }: { onLimit: () => void }):
       let sum = 0;
       for (let i = 0; i < frame.length; i++) sum += frame[i] * frame[i];
       return Math.sqrt(sum / frame.length);
+    },
+    extend: () => {
+      if (limited) return limitSeconds;
+      limitSeconds = extendVoiceLimit(limitSeconds);
+      maxSamples = limitSeconds * ctx.sampleRate;
+      return limitSeconds;
     },
   };
 }

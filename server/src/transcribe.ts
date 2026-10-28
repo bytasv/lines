@@ -15,12 +15,10 @@ import { execFile as nodeExecFile } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { isVoiceLanguage, VOICE_AUDIO_MAX_BYTES } from '@lines/shared';
+import { isVoiceLanguage, transcribeBudgetMs, VOICE_AUDIO_MAX_BYTES } from '@lines/shared';
 import type { WhisperStatus } from '@lines/shared';
 import { pickWhisperModel, whisperRefusalMessage, whisperStatus } from './whisperCli.ts';
 
-/** Generous for the base model on a laptop; a VPS bridge is slower. */
-export const TRANSCRIBE_TIMEOUT_MS = 120_000;
 /** Waiting behind the running one. More than this is refused rather than queued
  *  for minutes nobody will wait through. */
 export const TRANSCRIBE_MAX_QUEUED = 4;
@@ -36,6 +34,7 @@ export interface TranscribeDeps {
   execFile?: ExecFileFn;
   /** Parent of the per-request scratch directory. */
   tmpDir?: string;
+  /** Overrides {@link transcribeBudgetMs}, which scales with the audio's length. */
   timeoutMs?: number;
   maxQueued?: number;
 }
@@ -104,7 +103,6 @@ export function createTranscriber(
 ): (audio: string, options?: TranscribeOptions) => Promise<string> {
   const status = deps.status ?? whisperStatus;
   const execFile = deps.execFile ?? defaultExecFile;
-  const timeoutMs = deps.timeoutMs ?? TRANSCRIBE_TIMEOUT_MS;
   const maxQueued = deps.maxQueued ?? TRANSCRIBE_MAX_QUEUED;
   let tail: Promise<unknown> = Promise.resolve();
   /** Accepted and not yet settled, the running one included. */
@@ -124,7 +122,7 @@ export function createTranscriber(
         const { stdout } = await execFile(
           whisper.path,
           ['-m', model.path, '-f', wav, '-nt', '-np', ...languageArgs(model.multilingual, language, translate)],
-          { timeout: timeoutMs },
+          { timeout: deps.timeoutMs ?? transcribeBudgetMs(bytes.length) },
         );
         return cleanTranscript(stdout);
       } catch (err) {

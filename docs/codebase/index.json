@@ -4518,12 +4518,16 @@
         "insertAtCaret",
         "spliceTranscript",
         "useVoiceDictation",
-        "DictateButton"
+        "DictateButton",
+        "extendVoiceLimit",
+        "voiceLimitWarning",
+        "transcribeBudgetMs"
       ],
       "tests": [
         "server/src/whisperCli.test.ts",
         "server/src/transcribe.test.ts",
-        "server/src/whisperModel.test.ts"
+        "server/src/whisperModel.test.ts",
+        "server/src/voiceLimit.test.ts"
       ],
       "businessRules": [
         "transcribe needs the prompt capability, not a session grant — dictating is exactly as privileged as typing",
@@ -4531,7 +4535,8 @@
         "an English-only model is always run with -l en and never asked to translate, regardless of the language or translate flag requested",
         "a named non-English language (or translate) with only the English-only model installed is refused rather than silently mistranscribed",
         "one transcription and one model download run at a time per bridge",
-        "recordings longer than VOICE_MAX_SECONDS (90s) auto-stop and are transcribed as caught",
+        "a recording starts with a VOICE_INITIAL_SECONDS (2 min) limit; in the last VOICE_WARN_SECONDS (30s) a warning shows with a \"+2 min\" extend, each press adding VOICE_EXTEND_SECONDS up to the VOICE_MAX_SECONDS (10 min) ceiling",
+        "at the limit a recording auto-stops and is transcribed as caught, and the transcribe timeout scales with the recording's length",
         "Send while recording or transcribing finishes the recording and sends once the transcript is spliced in; a failed or empty transcription sends nothing and leaves the prompt as it was",
         "a Send pressed while dictating survives leaving the session: the transcript is appended to the prompt as it stood at Send and sent to that session, and its draft is cleared; dictation that was not sent is still dropped on unmount",
         "dictation in a card field (an Other… answer, a plan-comment note) only fills or appends text; it never picks, advances, saves or submits, shows only with the prompt capability, and ends when its field closes",

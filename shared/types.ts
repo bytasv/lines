@@ -332,13 +332,47 @@ export function isVoiceLanguage(code: string): boolean {
   return code === 'auto' || /^[a-z]{2,3}$/.test(code);
 }
 
-/** Longest recording the composer takes; the bridge's byte cap is sized from it. */
-export const VOICE_MAX_SECONDS = 90;
+/** A recording's limit when it starts. */
+export const VOICE_INITIAL_SECONDS = 120;
+/** What one "+2 min" press adds to the limit. */
+export const VOICE_EXTEND_SECONDS = 120;
+/** How long before the limit the warning (and the extend button) shows. */
+export const VOICE_WARN_SECONDS = 30;
+/** Hard ceiling, however many times the limit is extended; the bridge's byte
+ *  cap is sized from it. */
+export const VOICE_MAX_SECONDS = 600;
 /**
  * Decoded WAV bytes the bridge accepts in one `transcribe`. 16 kHz mono 16-bit
- * PCM is 32 KB/s, so {@link VOICE_MAX_SECONDS} is ~2.9 MB; the rest is headroom.
+ * PCM is 32 KB/s, so {@link VOICE_MAX_SECONDS} is ~19.2 MB; the rest is headroom.
+ * Base64 of that (~32 MB) still fits the bridge's and the relay's frame limits.
  */
-export const VOICE_AUDIO_MAX_BYTES = 4 * 1024 * 1024;
+export const VOICE_AUDIO_MAX_BYTES = 24 * 1024 * 1024;
+
+/** The limit after one more extend, never past {@link VOICE_MAX_SECONDS}. */
+export function extendVoiceLimit(limitSeconds: number): number {
+  return Math.min(limitSeconds + VOICE_EXTEND_SECONDS, VOICE_MAX_SECONDS);
+}
+
+/** Milliseconds left once inside the last {@link VOICE_WARN_SECONDS} of the
+ *  limit, otherwise null. Never negative. */
+export function voiceLimitWarning(elapsedMs: number, limitSeconds: number): number | null {
+  const left = limitSeconds * 1000 - elapsedMs;
+  if (left > VOICE_WARN_SECONDS * 1000) return null;
+  return Math.max(0, left);
+}
+
+/** 16 kHz mono 16-bit PCM. */
+const VOICE_BYTES_PER_SECOND = 32_000;
+
+/**
+ * How long whisper may take on a recording of `audioBytes` decoded WAV bytes:
+ * a base generous for the base model on a laptop, plus a second per second of
+ * audio, since a VPS bridge is slower and a 10 min clip takes a while. The
+ * client's deadline is derived from it too, so the two cannot drift.
+ */
+export function transcribeBudgetMs(audioBytes: number): number {
+  return 120_000 + Math.ceil(audioBytes / VOICE_BYTES_PER_SECOND) * 1000;
+}
 
 /**
  * 'auto' is UI-level: the SDK runs in acceptEdits underneath while the bridge

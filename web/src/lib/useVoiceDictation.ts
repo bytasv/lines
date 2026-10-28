@@ -1,5 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
-import { VOICE_LANGUAGES, voiceModelReady, whisperModelFor } from '@lines/shared';
+import {
+  VOICE_INITIAL_SECONDS,
+  VOICE_LANGUAGES,
+  VOICE_MAX_SECONDS,
+  voiceLimitWarning,
+  voiceModelReady,
+  whisperModelFor,
+} from '@lines/shared';
 import { useStore } from '../store';
 import { transcribeAudio } from '../ws';
 import { useSessionMachine } from './can';
@@ -34,6 +41,13 @@ export interface VoiceDictation {
   voiceLevel: (() => number) | null;
   /** Milliseconds recorded so far. */
   elapsed: number;
+  /** Milliseconds until the limit stops the recording, inside the warning
+   *  window only; null otherwise and when not recording. */
+  remainingMs: number | null;
+  /** The limit can still be pushed out — it is below the ceiling. */
+  canExtend: boolean;
+  /** Push the live recording's limit out by one extend. */
+  extend: () => void;
   /** Why the mic cannot record, or null. */
   voiceBlock: string | null;
   /** Settings → Voice input can fix `voiceBlock`. */
@@ -71,6 +85,7 @@ export function useVoiceDictation(sessionId: string, onText: (text: string) => v
   const [voice, setVoice] = useState<VoiceState>('idle');
   const [voiceStartedAt, setVoiceStartedAt] = useState(0);
   const [elapsed, setElapsed] = useState(0);
+  const [limitSeconds, setLimitSeconds] = useState(VOICE_INITIAL_SECONDS);
   const [voiceError, setVoiceError] = useState<string | null>(null);
   const recordingRef = useRef<VoiceRecording | null>(null);
   /** Bumped by `cancel`, so a transcription already in flight is dropped. */
@@ -177,13 +192,15 @@ export function useVoiceDictation(sessionId: string, onText: (text: string) => v
   const start = async () => {
     setVoiceError(null);
     try {
-      // The limit stops capture on its own; transcribing what was caught is the
-      // least surprising thing to do with it.
+      // The limit is warned about and can be extended up to the ceiling; when it
+      // does stop capture, transcribing what was caught is the least surprising
+      // thing to do with it.
       const recording = await startVoiceRecording({ onLimit: () => void finishRef.current() });
       recordingRef.current = recording;
       setVoiceLevel(() => recording.level);
       setVoiceStartedAt(Date.now());
       setElapsed(0);
+      setLimitSeconds(VOICE_INITIAL_SECONDS);
       setVoice('recording');
     } catch (err) {
       setVoiceError(micErrorMessage(err));
@@ -200,6 +217,12 @@ export function useVoiceDictation(sessionId: string, onText: (text: string) => v
     setVoiceError,
     voiceLevel,
     elapsed,
+    remainingMs: voice === 'recording' ? voiceLimitWarning(elapsed, limitSeconds) : null,
+    canExtend: limitSeconds < VOICE_MAX_SECONDS,
+    extend: () => {
+      const recording = recordingRef.current;
+      if (recording) setLimitSeconds(recording.extend());
+    },
     voiceBlock,
     voiceBlockActionable,
     start,

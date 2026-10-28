@@ -29,12 +29,12 @@ are auto-discovered and self-healing, on the same pattern as the Claude/Codex CL
 ## Files
 
 - `web/src/lib/voiceRecorder.ts` — `getUserMedia` → 16 kHz mono WAV, base64; a loudness probe for
-  the waveform; the 90s auto-stop
+  the waveform; the recording limit, its end-of-recording warning and "+2 min" extend
 - `web/src/components/VoiceWaveform.tsx` — canvas bar waveform drawn from that loudness probe
 - `web/src/lib/useVoiceDictation.ts` — the one hook behind every mic: recording state, timer,
   block reason, transcribe call; hands the text to a caller-supplied `onText`
-- `web/src/components/DictateButton.tsx` — mic/discard/finish controls and the
-  disabled-with-reason state, shared by the composer and the cards
+- `web/src/components/DictateButton.tsx` — mic/discard/finish controls, the disabled-with-reason
+  state, and the limit notice (`VoiceLimitNotice`) shared by the composer and the cards
 - `web/src/components/Composer.tsx` — the recording overlay, Send-while-dictating, and the link
   from a blocked mic into Settings → Voice input
 - `web/src/components/QuestionPrompt.tsx`, `web/src/components/PermissionPrompt.tsx` — mic inside
@@ -51,13 +51,14 @@ are auto-discovered and self-healing, on the same pattern as the Claude/Codex CL
   `LINES_WHISPER_BIN` → Homebrew → PATH), installed-model discovery, `pickWhisperModel`
 - `server/src/whisperModel.ts` — streams a model from Hugging Face into `<app root>/models/`,
   behind one bridge-wide download slot
-- `server/src/transcribe.ts` — validates and runs one `whisper-cli` invocation; the one-at-a-time
-  queue
+- `server/src/transcribe.ts` — validates and runs one `whisper-cli` invocation, with a timeout that
+  scales with the recording's length; the one-at-a-time queue
 - `desktop/scripts/build-whisper.mjs` — compiles a static, Metal-enabled `whisper-cli` into the
   desktop bundle
 - `desktop/src/main.ts` — `installMediaPermissions()` (mic only, app origin only, then
   `systemPreferences.askForMediaAccess`); `NSMicrophoneUsageDescription` in `desktop/package.json`
-- `shared/types.ts` — `WhisperStatus`, `WHISPER_MODELS`, `whisperModelFor`, `VOICE_LANGUAGES`,
+- `shared/types.ts` — `WhisperStatus`, `WHISPER_MODELS`, `whisperModelFor`, `VOICE_LANGUAGES`, the
+  recording-limit constants and helpers,
   the `transcribe`/`installWhisperModel`/`transcription`/`whisperModelDownload` messages,
   `MESSAGE_AUTHZ.transcribe`/`installWhisperModel`
 
@@ -80,8 +81,12 @@ are auto-discovered and self-healing, on the same pattern as the Claude/Codex CL
   would touch a word, then calls `insertAtCaret`; used at the caret and, after the composer has
   unmounted, at the end of the prompt as it stood at Send
 
-- `useVoiceDictation(sessionId, onText)` — returns the voice state, `start`/`finish`/`cancel`/`commit`
-  and `voiceBlock`; `cancel` also drops a transcript still in flight, and `commit` (a Send pressed
+- `extendVoiceLimit(limitSeconds)` / `voiceLimitWarning(elapsedMs, limitSeconds)` /
+  `transcribeBudgetMs(audioBytes)` (shared) — the limit a "+2 min" press reaches, the time left once
+  the warning window opens, and the transcribe budget for a recording of a given size; the client's
+  transcribe deadline is derived from the same budget
+- `useVoiceDictation(sessionId, onText)` — returns the voice state, `start`/`finish`/`cancel`/`commit`,
+  `remainingMs`/`canExtend`/`extend` for the limit warning, and `voiceBlock`; `cancel` also drops a transcript still in flight, and `commit` (a Send pressed
   while dictating) makes the transcript survive the composer unmounting
 
 ## Data flow
@@ -134,7 +139,12 @@ approval staging when they press Send.
   falls back to it
 - one transcription and one model download run at a time per bridge; the audio may be a guest's
   but the CPU is the host's
-- recordings longer than `VOICE_MAX_SECONDS` (90s) auto-stop and are transcribed as caught
+- a recording starts with a `VOICE_INITIAL_SECONDS` (2 min) limit. In the last `VOICE_WARN_SECONDS`
+  (30s) of it a warning shows over the recording with a "+2 min" button; each press adds
+  `VOICE_EXTEND_SECONDS`, up to the `VOICE_MAX_SECONDS` (10 min) ceiling, where the button is hidden
+- at the limit the recording auto-stops and is transcribed as caught; no audio is lost
+- the bridge's transcribe timeout scales with the recording's length, so a long clip on a slow
+  machine is not cut short; the client waits a fixed margin longer than that budget
 - Send while recording or transcribing finishes the recording and sends once the transcript is spliced in; a failed or empty transcription sends nothing and leaves the prompt as it was
 - a Send pressed while dictating survives leaving the session: the transcript is appended to the prompt as it stood at Send and sent to that session, and its draft is cleared. Dictation that was not sent is still dropped when the composer unmounts, and the mic is released either way
 - dictation in a card field (an "Other…" answer, a plan-comment note) only fills or appends text;
@@ -167,7 +177,9 @@ approval staging when they press Send.
 - `server/src/whisperCli.test.ts` — binary discovery order (bundled → pinned → Homebrew → PATH),
   installed-model discovery, `pickWhisperModel`'s language rules
 - `server/src/transcribe.test.ts` — language/translate flags reaching whisper, the English-only
-  fallback, oversize/non-WAV/queue-cap refusals, timeout and cleanup
+  fallback, oversize/non-WAV/queue-cap refusals, timeout (including the length-scaled default) and
+  cleanup
+- `server/src/voiceLimit.test.ts` — the extend ceiling, the warning window, and the transcribe budget
 - `server/src/whisperModel.test.ts` — a complete download, an HTTP error, a truncated download, a
   non-model response — each checked against the `.part` file and the final path
 

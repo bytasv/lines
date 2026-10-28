@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import { VOICE_AUDIO_MAX_BYTES } from '@lines/shared';
+import { transcribeBudgetMs, VOICE_AUDIO_MAX_BYTES } from '@lines/shared';
 import type { WhisperStatus } from '@lines/shared';
 import { cleanTranscript, createTranscriber, type ExecFileFn } from './transcribe.ts';
 
@@ -118,6 +118,22 @@ test('a timeout is reported as one, and the temp file is still removed', async (
   await assert.rejects(run(wav()), /timed out/);
   assert.equal(seenTimeout, 1234);
   assert.deepEqual(fs.readdirSync(tmpDir), []);
+});
+
+test('without an override the timeout scales with the recording', async () => {
+  const seen: number[] = [];
+  const execFile: ExecFileFn = async (_file, _args, options) => {
+    seen.push(options.timeout);
+    return { stdout: 'ok', stderr: '' };
+  };
+  const run = createTranscriber({ status: () => READY, execFile, tmpDir: scratch() });
+  const short = wav();
+  const long = wav(32_000 * 300);
+  await run(short);
+  await run(long);
+  assert.equal(seen[0], transcribeBudgetMs(Buffer.from(short, 'base64').length));
+  assert.equal(seen[1], transcribeBudgetMs(Buffer.from(long, 'base64').length));
+  assert.ok(seen[1] > seen[0]);
 });
 
 test('a failure names whisper\'s last stderr line and cleans up', async () => {
