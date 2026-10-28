@@ -26,8 +26,10 @@ export function today(now = new Date()) {
 }
 
 /**
- * The changelog with `desktopPending` moved into a new newest `desktop` release.
- * The same object back when nothing is pending. Throws for a version that
+ * The changelog with `desktopPending` moved into a new newest `desktop` release,
+ * items verbatim: a `{ text, image }` item keeps its image, whose
+ * `desktop-next-…` file name is never renamed. The same object back when nothing
+ * is pending. Throws for a version that
  * already has a release: stamping twice would split one release's notes.
  */
 export function stampChangelog(changelog, version, date) {

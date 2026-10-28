@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react';
 import { Badge, Text } from '@mantine/core';
 import { IconBrowser, IconDeviceDesktop, IconHourglassLow, type TablerIcon } from '@tabler/icons-react';
-import { compareVersions, type ChangelogRelease } from '@lines/shared';
+import { compareVersions, itemImage, itemText, type ChangelogItem, type ChangelogRelease } from '@lines/shared';
 
 type Track = 'web' | 'desktop';
 
@@ -42,7 +42,7 @@ export function ChangelogList({
 }: {
   web: ChangelogRelease[];
   desktop: ChangelogRelease[];
-  pending?: string[];
+  pending?: ChangelogItem[];
   highlightSince?: Record<Track, string | null>;
 }) {
   const releases = [
@@ -95,7 +95,7 @@ function Entry({
   title: string;
   version?: string;
   date?: string;
-  items: string[];
+  items: ChangelogItem[];
   pending?: boolean;
   /** Badges after the version. */
   children?: ReactNode;
@@ -122,9 +122,24 @@ function Entry({
         )}
       </div>
       <ul className="lines-changelog-items">
-        {items.map((item) => (
-          <li key={item}>{item}</li>
-        ))}
+        {items.map((item) => {
+          const image = itemImage(item);
+          return (
+            <li key={itemText(item)}>
+              {itemText(item)}
+              {/* Decorative: the line above says what it shows. */}
+              {image && (
+                <img
+                  className="lines-changelog-image"
+                  src={`/changelog-media/${image}`}
+                  alt=""
+                  loading="lazy"
+                  decoding="async"
+                />
+              )}
+            </li>
+          );
+        })}
       </ul>
     </li>
   );

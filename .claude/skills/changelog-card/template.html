@@ -1,0 +1,197 @@
+<!doctype html>
+<!--
+  The changelog card frame: 1200×675 (16:9, accepted by X and LinkedIn). render.mjs fills the slots
+  ({{LAYOUT}}, {{LOGO}}, {{TITLE}}, {{STAGE}}) and screenshots it at 2×. Self-contained: no web
+  fonts, no network. Scenes use only the variables and helpers below.
+
+  Layouts: `side` puts the title left and gives the stage 664×563; `stacked` puts the title on top
+  and gives the stage 1072×~460, for a flow or a wide before/after. `app` (render.mjs's default) is
+  the stage alone (1104×595), for a card read in the app's What's new, which shows the item's text.
+
+  The variables are Lines' dark scheme (web/src/theme.ts, Mantine's dark tokens): the What's new
+  card sits on the splash's charcoal, so a dark card reads as part of the app.
+-->
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  :root {
+    /* Lines has no accent hue; indigo is the "New" badge and the one colour a card may point with. */
+    --accent: #7e96d8;
+    --accentLight: rgb(126 150 216 / 16%);
+    --blue: #669dd5;
+    --green: #6da972;
+    --yellow: #d89f3a;
+    --red: #d77a74;
+    --text: #d4d4d4;
+    --textMuted: #999999;
+    --line: #3a3a3a;
+    --panel: #262626;
+    --body: #1e1e1e;
+    --deep: #141414;
+    --menuShadow: 0px 25px 40px -10px rgb(0 0 0 / 45%), 0px 0px 0px 1px rgb(255 255 255 / 6%);
+    --radius: 8px;
+    --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    --mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    width: 1200px;
+    height: 675px;
+    overflow: hidden;
+    font-family: var(--font);
+    color: var(--text);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .card {
+    position: relative;
+    width: 1200px;
+    height: 675px;
+    padding: 56px 64px;
+    display: flex;
+    gap: 48px;
+    background:
+      radial-gradient(120% 90% at 100% 0%, rgb(126 150 216 / 12%) 0%, rgb(126 150 216 / 0%) 55%),
+      var(--body);
+  }
+
+  .copy {
+    flex: 0 0 360px;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /*
+   * The frame's own text is sized for a feed, where the card is about 514px wide (X): at least
+   * 10px on screen, as render.mjs asks of a scene.
+   */
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-weight: 700;
+    font-size: 30px;
+    letter-spacing: -0.01em;
+  }
+
+  .brand img { width: 40px; height: 40px; }
+
+  .eyebrow {
+    margin-top: auto;
+    font-size: 22px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--accent);
+  }
+
+  .title {
+    margin-top: 12px;
+    font-size: 44px;
+    line-height: 1.12;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+  }
+
+  .url {
+    margin-top: auto;
+    font-size: 22px;
+    color: var(--textMuted);
+  }
+
+  .card.stacked {
+    flex-direction: column;
+    gap: 28px;
+    padding: 44px 64px 48px;
+  }
+
+  .card.stacked .copy {
+    flex: 0 0 auto;
+    display: grid;
+    grid-template-columns: auto 1fr;
+    grid-template-areas: 'brand eyebrow' 'title title';
+    align-items: center;
+    column-gap: 20px;
+  }
+
+  .card.stacked .brand { grid-area: brand; }
+  .card.stacked .eyebrow { grid-area: eyebrow; margin-top: 0; }
+  .card.stacked .title { grid-area: title; margin-top: 18px; font-size: 40px; }
+  .card.stacked .url { display: none; }
+
+  .card.app { padding: 40px 48px; }
+  .card.app .copy { display: none; }
+
+  .stage {
+    position: relative;
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 32px;
+    /* Not clipped here: a shadow would end in a hard box. The card's edge clips a deliberate crop. */
+  }
+
+  /*
+   * Helpers a scene may use.
+   *
+   * `.ui` / `.ui-small` are the app's own scale (Mantine `sm` 12.5px, `xs` 11px). Mock at those true
+   * sizes and wrap the mock in `.zoom` (2×), or `.zoom-3` for a single control: the card is often
+   * seen at a third of its size, where unzoomed 12px text is 4px and unreadable. render.mjs warns
+   * about text that ends up too small.
+   *
+   * `.bleed-right` / `.bleed-bottom` fade a mock that deliberately runs off the card's edge, so a
+   * fragment of a big panel reads as part of something bigger instead of being shrunk to fit. Give the
+   * element a negative margin (-48px right, -40px bottom in `app`; -64px / -56px otherwise) so its
+   * box, and the fade, reach that edge.
+   */
+  .ui { font-size: 12.5px; line-height: 1.55; }
+  .ui-small { font-size: 11px; line-height: 1.45; }
+  .zoom { zoom: 2; }
+  .zoom-3 { zoom: 3; }
+  .window {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    box-shadow: var(--menuShadow);
+    overflow: hidden;
+  }
+  .bleed-right { mask-image: linear-gradient(90deg, #000 75%, transparent); }
+  .bleed-bottom { mask-image: linear-gradient(180deg, #000 70%, transparent); }
+  .arrow {
+    flex: 0 0 auto;
+    font-size: 40px;
+    color: var(--textMuted);
+  }
+  .label {
+    font-size: 18px;
+    font-weight: 600;
+    color: var(--textMuted);
+    text-align: center;
+    margin-bottom: 12px;
+  }
+  .highlight {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+</style>
+</head>
+<body>
+  <div class="card {{LAYOUT}}">
+    <div class="copy">
+      <div class="brand">{{LOGO}}<span>Lines</span></div>
+      <div class="eyebrow">What's new</div>
+      <div class="title">{{TITLE}}</div>
+      <div class="url">linesapp.cloud</div>
+    </div>
+    <div class="stage">{{STAGE}}</div>
+  </div>
+</body>
+</html>

@@ -2,7 +2,16 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
-import { compareVersions, nextSeen, releasesSince, type Changelog, type ChangelogRelease } from '@lines/shared';
+import {
+  compareVersions,
+  itemImage,
+  itemText,
+  nextSeen,
+  releasesSince,
+  type Changelog,
+  type ChangelogItem,
+  type ChangelogRelease,
+} from '@lines/shared';
 
 const release = (version: string): ChangelogRelease => ({ version, date: '2026-10-05', items: [version] });
 /** Newest first, as changelog.json keeps them. */
@@ -40,11 +49,35 @@ test('nextSeen caps at the newest known release, so notes published later still 
   assert.equal(nextSeen('0.4.0', '0.6.0', []), '0.6.0');
 });
 
+test('itemText and itemImage read both item shapes', () => {
+  assert.equal(itemText('plain'), 'plain');
+  assert.equal(itemImage('plain'), undefined);
+  assert.equal(itemText({ text: 'carded', image: 'web-0.1.1-x.png' }), 'carded');
+  assert.equal(itemImage({ text: 'carded', image: 'web-0.1.1-x.png' }), 'web-0.1.1-x.png');
+  assert.equal(itemImage({ text: 'no card' }), undefined);
+});
+
+const ROOT = path.resolve(import.meta.dirname, '..', '..');
+const MEDIA = path.join(ROOT, 'web', 'public', 'changelog-media');
+
+/** A non-empty line, and when it has a card, a lower-case PNG name that exists under changelog-media. */
+function assertItem(item: ChangelogItem, where: string) {
+  assert.ok(typeof item === 'string' || (typeof item === 'object' && item !== null), `${where} item shape`);
+  const text = itemText(item);
+  assert.ok(typeof text === 'string' && text.trim(), `${where} empty item`);
+  if (typeof item === 'object' && 'image' in item) {
+    const image = itemImage(item);
+    assert.ok(typeof image === 'string', `${where} image is not a file name`);
+    assert.match(image, /^[a-z0-9.-]+\.png$/, `${where} image name`);
+    assert.ok(fs.existsSync(path.join(MEDIA, image)), `${where} image ${image} missing from web/public/changelog-media`);
+  }
+}
+
 test('changelog.json is well-formed', () => {
-  const file = path.resolve(import.meta.dirname, '..', '..', 'changelog.json');
+  const file = path.join(ROOT, 'changelog.json');
   const changelog = JSON.parse(fs.readFileSync(file, 'utf8')) as Changelog;
   assert.ok(Array.isArray(changelog.desktopPending));
-  for (const item of changelog.desktopPending) assert.ok(typeof item === 'string' && item.trim(), 'empty pending item');
+  for (const item of changelog.desktopPending) assertItem(item, 'pending');
   for (const track of ['web', 'desktop'] as const) {
     const releases = changelog[track];
     assert.ok(Array.isArray(releases), `${track} is not a list`);
@@ -53,9 +86,7 @@ test('changelog.json is well-formed', () => {
       assert.match(r.date, /^\d{4}-\d{2}-\d{2}$/, `${track} ${r.version} date`);
       assert.ok(!Number.isNaN(Date.parse(r.date)), `${track} ${r.version} date`);
       assert.ok(r.items.length > 0, `${track} ${r.version} has no items`);
-      for (const item of r.items) {
-        assert.ok(typeof item === 'string' && item.trim(), `${track} ${r.version} empty item`);
-      }
+      for (const item of r.items) assertItem(item, `${track} ${r.version}`);
       // Strictly descending, which also means unique.
       if (i > 0) {
         assert.ok(compareVersions(releases[i - 1].version, r.version) > 0, `${track} out of order at ${r.version}`);

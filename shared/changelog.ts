@@ -20,12 +20,30 @@ export function compareVersions(a: string, b: string): number {
   return 0;
 }
 
+/**
+ * One user-facing change: a plain line, or a line with a card image under it.
+ * `image` is a file name only, under web/public/changelog-media/, made by the
+ * changelog-card skill (.claude/skills/changelog-card). The name is opaque: a
+ * pending desktop item keeps its `desktop-next-…` name when it is stamped.
+ */
+export type ChangelogItem = string | { text: string; image?: string };
+
+/** The item's line of text. */
+export function itemText(item: ChangelogItem): string {
+  return typeof item === 'string' ? item : item.text;
+}
+
+/** The item's card image file name, if it has one. */
+export function itemImage(item: ChangelogItem): string | undefined {
+  return typeof item === 'string' ? undefined : item.image;
+}
+
 /** One shipped version of one track, and the user-facing changes it brought. */
 export interface ChangelogRelease {
   version: string;
   /** `YYYY-MM-DD`. */
   date: string;
-  items: string[];
+  items: ChangelogItem[];
 }
 
 /**
@@ -37,7 +55,7 @@ export interface ChangelogRelease {
 export interface Changelog {
   web: ChangelogRelease[];
   desktop: ChangelogRelease[];
-  desktopPending: string[];
+  desktopPending: ChangelogItem[];
 }
 
 /** The releases above `lastSeen`, up to and including `current`. */

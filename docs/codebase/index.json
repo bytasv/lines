@@ -4959,10 +4959,18 @@
         "web/src/main.tsx",
         "web/src/App.tsx",
         "web/src/components/SettingsModal.tsx",
-        "desktop/scripts/stamp-changelog.mjs"
+        "desktop/scripts/stamp-changelog.mjs",
+        "scripts/changelog/announce.mjs"
       ],
       "files": [
         "changelog.json",
+        "web/public/changelog-media",
+        ".claude/skills/changelog-card/SKILL.md",
+        ".claude/skills/changelog-card/render.mjs",
+        ".claude/skills/changelog-card/template.html",
+        "scripts/changelog/added.mjs",
+        "scripts/changelog/announce.mjs",
+        ".github/workflows/deploy.yml",
         "shared/changelog.ts",
         "shared/types.ts",
         "server/src/claudeCli.ts",
@@ -5000,12 +5008,17 @@
         "WhatsNewSection",
         "ChangelogList",
         "stampChangelog",
-        "stampFile"
+        "stampFile",
+        "ChangelogItem",
+        "itemText",
+        "itemImage",
+        "addedReleases"
       ],
       "tests": [
         "server/src/changelog.test.ts",
         "desktop/scripts/stamp-changelog.test.mjs",
-        "server/src/claudeCli.test.ts"
+        "server/src/claudeCli.test.ts",
+        "scripts/changelog/added.test.mjs"
       ],
       "businessRules": [
         "two tracks, web (__LINES_VERSION__) and desktop (bridge.version from the first hello), each with its own localStorage marker (lines.seenWeb, lines.seenDesktop); either one past its marker shows every release in between",
@@ -5013,13 +5026,17 @@
         "nextSeen caps at the newest release the bundle knows, so desktop notes stamped after a web deploy still show on a later load",
         "decided once per page load, so a machine switch never reshows the card; guests never see it",
         "desktop notes wait in desktopPending until ship.mjs stamps them with the version it bumps; the CI guard fails on a non-empty desktopPending",
-        "only user-facing feat or noticeable fix commits get an entry, one short user-worded line each; web/ paths go to the web track with a web/package.json patch bump, desktop/ server/ shared/ paths go to desktopPending"
+        "only user-facing feat or noticeable fix commits get an entry, one short user-worded line each; web/ paths go to the web track with a web/package.json patch bump, desktop/ server/ shared/ paths go to desktopPending",
+        "an item is a plain line or `{text, image}`; the image is a card file name under web/public/changelog-media, shown under the line in What's new",
+        "the announce job sends each release a deploy added to a web or desktop track to social-driver as a draft (keyed `lines-<track>@<version>`); pending desktop items are never announced, and a missing webhook secret is a no-op"
       ],
       "architecturalRules": [
         "the app mounts and loads behind the card; holdApp suspends the splash fallback timer so an open card is never faded away",
         "the splash centres mark and card as one group while held and glides on size change; the layer clips outside shown, so the list scrolls inside the card",
         "compareVersions lives in shared/changelog.ts and is re-exported from server/src/claudeCli.ts",
-        "changelog.json is read by web/vite.config.ts at config time and baked in, so the web image must copy it"
+        "changelog.json is read by web/vite.config.ts at config time and baked in, so the web image must copy it",
+        "a pending desktop item's image name is opaque and never renamed when stamped",
+        "the announce job runs after deploy and is continue-on-error, so a social failure never fails the deploy"
       ],
       "relatedDecisions": [
         "brand-logo",

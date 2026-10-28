@@ -14,11 +14,18 @@ from 0.1.0 to 0.5.0 lists everything in between. Settings → What's new keeps t
 - `web/src/App.tsx` — mounts `DesktopUpdateWhatsNew` for updates that arrive mid-session
 - `web/src/components/SettingsModal.tsx` — the `whatsNew` section (System group, after `updates`)
 - `desktop/scripts/stamp-changelog.mjs` — moves pending desktop notes into a release
+- `scripts/changelog/announce.mjs` — after deploy, sends added releases to social-driver as drafts
 
 ## Files
 
 - `changelog.json` (repo root) — the data
-- `shared/changelog.ts` — types and the version rules; re-exported from `shared/types.ts`
+- `shared/changelog.ts` — types, item accessors and the version rules; re-exported from `shared/types.ts`
+- `web/public/changelog-media/` — the item card images, served from the site root
+- `.claude/skills/changelog-card/` — the skill that renders a card per item (`SKILL.md`, `render.mjs`,
+  `template.html`); its previews go to `.debug-runs/`, which is not committed
+- `scripts/changelog/added.mjs` — which releases a deploy added, by track and version
+- `scripts/changelog/announce.mjs` — the announce step's payloads and signed webhook call
+- `.github/workflows/deploy.yml` — the `announce` job, after `deploy`, on main pushes only
 - `web/src/lib/whatsNew.ts` — localStorage markers and the show/don't-show decision
 - `web/src/lib/splash.ts` — `holdApp`, `splashSlot`
 - `web/src/components/WhatsNew.tsx`, `WhatsNewModal.tsx`, `WhatsNewSection.tsx`,
@@ -38,13 +45,16 @@ from 0.1.0 to 0.5.0 lists everything in between. Settings → What's new keeps t
 - `holdApp`, `splashSlot`
 - `WhatsNew`, `WhatsNewPanel`, `WhatsNewModal`, `DesktopUpdateWhatsNew`, `WhatsNewSection`,
   `ChangelogList`
+- `ChangelogItem`, `itemText`, `itemImage`
 - `stampChangelog`, `stampFile`
+- `addedReleases`
 
 ## Data flow
 
 **Data.** `changelog.json` holds two tracks, `web` and `desktop`, each newest first as
 `{version, date, items[]}`, plus `desktopPending`: desktop notes committed since the last desktop
-release. Vite reads it at config time and bakes it into the bundle, so a web deploy always carries
+release. An item is a plain string or `{text, image?}`; `image` is a file name only, a card under
+`web/public/changelog-media/`. The card is drawn under the item's line in What's new and in Settings. Vite reads it at config time and bakes it into the bundle, so a web deploy always carries
 the latest file.
 
 **Two markers.** `localStorage` keys `lines.seenWeb` and `lines.seenDesktop` record the newest
@@ -63,6 +73,17 @@ splash. `DesktopUpdateWhatsNew` watches `bridge.version`; a version above the ma
 in range opens `WhatsNewModal`, and closing it marks them seen. Web updates need a reload and show
 through the boot path.
 
+**Cards.** The changelog-card skill renders one 1200×675 PNG per visible item from an HTML scene,
+checks that its text reads at the card's on-screen width, and writes two previews (the item in
+What's new, and at feed width). Its file is named `<track>-<version>-<slug>.png`, or
+`desktop-next-<slug>.png` for a pending item. A pending item keeps that name when stamped.
+
+**Announce.** After a push to main that deploys, `announce.mjs` compares `changelog.json` at the
+previous and new commits and POSTs each release the push added to social-driver, HMAC-signed with
+`X-Lines-Signature`, as a draft post. The image URL is built against `LINES_PUBLIC_URL`. Payload
+titles are derived from the first sentence of each item, since items have no title of their own.
+Pending desktop items are never sent.
+
 **Settings.** Settings → What's new renders the whole changelog on one timeline, newest first, with
 a "New" badge on releases above what this browser had seen when the page loaded, and a dashed
 "Next desktop release" entry while `desktopPending` is non-empty.
@@ -76,10 +97,13 @@ notes into a new `desktop` release when it commits a version bump, in the same c
 ## Tests
 
 - `server/src/changelog.test.ts` — `releasesSince` bounds and skipped versions, `nextSeen` never
-  moving back and capping at the newest known release, and the shape of the real `changelog.json`
-  (strictly descending, valid dates, non-empty items)
+  moving back and capping at the newest known release, `itemText` and `itemImage` for both item
+  shapes, and the shape of the real `changelog.json` (strictly descending, valid dates, non-empty
+  items, each image a lower-case PNG name that exists in `web/public/changelog-media/`)
 - `desktop/scripts/stamp-changelog.test.mjs` — pending items move into the release, no-op when
-  nothing is pending, refuses a version that already exists
+  nothing is pending, refuses a version that already exists, an image item survives stamping
+- `scripts/changelog/added.test.mjs` — added releases per track, an edited release is not added
+  again, pending items are never added, a missing `from` adds everything
 - `server/src/claudeCli.test.ts` — still covers `compareVersions` through the re-export
 
 ## Business rules
@@ -101,6 +125,10 @@ notes into a new `desktop` release when it commits a version bump, in the same c
 - A CI release cannot commit: the workflow's guard job fails if `desktopPending` is non-empty,
   with a hint to run `npm run changelog:stamp -w desktop` and commit first (skipped on a dry run).
 - Stamping refuses a desktop version that already has a release.
+- A pending desktop item's image name is opaque: stamping moves the item verbatim, so the file
+  stays `desktop-next-…` after release.
+- The announce job is `continue-on-error` and runs only on main pushes; with either webhook secret
+  unset it prints a notice and exits 0.
 - Commits made outside the workflow add no entry and no web bump; the cost is a missing line.
 
 ## Architectural rules
@@ -112,6 +140,8 @@ notes into a new `desktop` release when it commits a version bump, in the same c
   clips outside `shown`, so the card caps its height and scrolls its list internally.
 - `compareVersions` lives in `shared/changelog.ts`; `server/src/claudeCli.ts` re-exports it so
   `codexCli.ts` and the existing tests are unchanged.
+- The announce job runs after deploy, so a card's image URL resolves before a draft links to it. A
+  social failure never marks the deploy red.
 - The web version is bumped per user-facing commit, so `__LINES_VERSION__` now moves with the
   changelog.
 - Dev builds never show the desktop part by themselves: an unpackaged bridge reports

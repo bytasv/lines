@@ -46,6 +46,8 @@ jobs:
         run: npm run test -w relay
       - if: matrix.leg == 'runtime'
         run: npm run test -w storage
+      - if: matrix.leg == 'runtime'
+        run: npm run test:scripts
 
   check-migrations:
     runs-on: ubuntu-latest
@@ -170,3 +172,27 @@ jobs:
             ssh -i "$key_file" -o StrictHostKeyChecking=yes \
               "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}"
           rm -f "$key_file"
+
+  # Releases this push added to `changelog.json` become draft posts in
+  # social-driver (scripts/changelog/announce.mjs), after the deploy so their
+  # image URLs already resolve. A social failure never marks the deploy red.
+  announce:
+    needs: deploy
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Announce added releases
+        run: node scripts/changelog/announce.mjs --from "$FROM" --to "$TO"
+        env:
+          FROM: ${{ github.event.before }}
+          TO: ${{ github.sha }}
+          SOCIAL_DRIVER_WEBHOOK_URL: ${{ secrets.SOCIAL_DRIVER_WEBHOOK_URL }}
+          SOCIAL_DRIVER_WEBHOOK_TOKEN: ${{ secrets.SOCIAL_DRIVER_WEBHOOK_TOKEN }}
+          LINES_PUBLIC_URL: ${{ vars.LINES_PUBLIC_URL }}

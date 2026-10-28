@@ -278,6 +278,18 @@
   color: var(--mantine-color-dimmed);
 }
 
+/* An item's card (changelog-card skill). The aspect ratio holds its height
+   before it loads, so the What's new card's glide and fades do not jump. */
+.lines-changelog-image {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 1200 / 675;
+  margin-top: 8px;
+  border: 1px solid var(--mantine-color-default-border);
+  border-radius: var(--mantine-radius-sm);
+}
+
 /* The What's new card and modal (WhatsNew.tsx). The dark-scheme card sits a
    step above the splash's charcoal, as Mantine's cards do; the action sits
    under a hairline of its own. */

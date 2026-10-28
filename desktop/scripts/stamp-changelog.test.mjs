@@ -19,6 +19,15 @@ test('moves pending items into a new newest desktop release', () => {
   assert.deepEqual(after.web, base().web);
 });
 
+test('carries an item with an image through unchanged', () => {
+  const pending = ['plain', { text: 'with a card', image: 'desktop-next-card.png' }];
+  const after = stampChangelog({ ...base(), desktopPending: pending }, '0.2.43', '2026-10-06');
+  assert.deepEqual(after.desktop[0].items, [
+    'plain',
+    { text: 'with a card', image: 'desktop-next-card.png' },
+  ]);
+});
+
 test('is a no-op when nothing is pending', () => {
   const changelog = { ...base(), desktopPending: [] };
   assert.equal(stampChangelog(changelog, '0.2.43', '2026-10-06'), changelog);

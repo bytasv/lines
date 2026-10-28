@@ -25,13 +25,15 @@
     "prepare": "git config core.hooksPath .githooks 2>/dev/null || true",
     "dev": "concurrently -n backend,web,storage -c blue,green,yellow \"npm run dev:backend\" \"npm run dev -w web\" \"npm run dev -w storage\"",
     "typecheck": "npm run typecheck -w server && npm run typecheck -w relay && npm run typecheck -w web && npm run typecheck -w storage && npm run typecheck -w desktop",
-    "test": "npm run test -w server",
+    "test": "npm run test -w server && npm run test:scripts",
+    "test:scripts": "node --test scripts/changelog/*.test.mjs",
     "docs:validate": "node scripts/validate-docs-index.mjs",
     "dev:storage": "npm run dev -w storage",
     "dev:backend": "node server/scripts/dev-runtime.mjs"
   },
   "devDependencies": {
     "concurrently": "^9.1.2",
-    "esbuild": "^0.28.1"
+    "esbuild": "^0.28.1",
+    "playwright-core": "^1.64.1"
   }
 }

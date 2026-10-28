@@ -1,6 +1,16 @@
 {
   "web": [
     {
+      "version": "0.1.37",
+      "date": "2026-10-28",
+      "items": [
+        {
+          "text": "Some updates in What's new now come with a picture of what changed, right under the line.",
+          "image": "web-0.1.37-pictures.png"
+        }
+      ]
+    },
+    {
       "version": "0.1.36",
       "date": "2026-10-28",
       "items": [

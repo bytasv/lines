@@ -30,3 +30,6 @@ deploy/docker/lines.env
 .cache/
 *.tsbuildinfo
 web/certs/
+
+# Changelog card scenes and previews (.claude/skills/changelog-card)
+.debug-runs/
