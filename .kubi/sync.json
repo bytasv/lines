@@ -1,0 +1,7 @@
+{
+  "components": {
+    "dir": ".kubi/components",
+    "config": ".kubi/kubi.config.tsx",
+    "storybook": false
+  }
+}
