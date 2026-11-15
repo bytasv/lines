@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import type {
   AuthStatus,
+  ClientMessage,
   BridgeInfo,
   ContextBreakdown,
   GrepResponse,
@@ -59,6 +60,16 @@ import {
   worktreePaths,
 } from '@lines/shared';
 import { send, sendToMachine, switchDevice } from './ws';
+import {
+  clearSent,
+  failSending,
+  finishSending,
+  progressSending,
+  removeSending,
+  startSending,
+  type SendingPrompt,
+  type SendingPrompts,
+} from './lib/sendingPrompts';
 import {
   alertTarget,
   emptyMachine,
@@ -1003,6 +1014,8 @@ interface UiState {
   focusComposerFor: string | null;
   /** Prompts waiting for the socket to come back, flushed FIFO after the next `hello`. */
   queuedPrompts: QueuedPrompt[];
+  /** Big prompts whose bytes are still leaving the browser, per session (see lib/sendingPrompts). */
+  sendingPrompts: SendingPrompts;
   sessions: Record<string, SessionMeta>;
   workflows: WorkflowDef[];
   /** Other users' published workflows — read-only, runnable/duplicable but not editable. */
@@ -1285,6 +1298,17 @@ interface UiState {
   drainQueuedPrompts: () => QueuedPrompt[];
   /** Discard one locally queued prompt before it is sent. */
   removeQueuedPrompt: (id: string) => void;
+  startSendingPrompt: (sessionId: string, row: Omit<SendingPrompt, 'progress' | 'phase'>) => void;
+  updateSendingProgress: (sessionId: string, id: string, progress: number, phase: 'encrypting' | 'sending') => void;
+  /** The frame left the browser: the row shows "Sent" until the bridge answers. */
+  finishSendingPrompt: (sessionId: string, id: string) => void;
+  failSendingPrompt: (sessionId: string, id: string) => void;
+  removeSendingPrompt: (sessionId: string, id: string) => void;
+  /**
+   * Hand a prompt that did not make it back to its session's draft: the
+   * composer if it is mounted (via `lines:prompt-restored`), storage otherwise.
+   */
+  restorePrompt: (rejected: Extract<ClientMessage, { type: 'prompt' }>) => void;
   selectSession: (id: string | null) => void;
   /**
    * Land on a session from a notification click: its machine, then its project
@@ -1629,6 +1653,7 @@ export const useStore = create<UiState>((set, get) => {
   seenSessionIds: new Set<string>(),
   pendingCreate: false,
   queuedPrompts: [],
+  sendingPrompts: {},
   sessions: {},
   workflows: [],
   sharedWorkflows: [],
@@ -1845,6 +1870,27 @@ export const useStore = create<UiState>((set, get) => {
   enqueuePrompt: (p) => set((state) => ({ queuedPrompts: [...state.queuedPrompts, p] })),
   removeQueuedPrompt: (id) =>
     set((state) => ({ queuedPrompts: state.queuedPrompts.filter((q) => q.id !== id) })),
+  startSendingPrompt: (sessionId, row) =>
+    set((state) => ({ sendingPrompts: startSending(state.sendingPrompts, sessionId, row) })),
+  updateSendingProgress: (sessionId, id, progress, phase) =>
+    set((state) => ({ sendingPrompts: progressSending(state.sendingPrompts, sessionId, id, progress, phase) })),
+  finishSendingPrompt: (sessionId, id) =>
+    set((state) => ({ sendingPrompts: finishSending(state.sendingPrompts, sessionId, id) })),
+  failSendingPrompt: (sessionId, id) =>
+    set((state) => ({ sendingPrompts: failSending(state.sendingPrompts, sessionId, id) })),
+  removeSendingPrompt: (sessionId, id) =>
+    set((state) => ({ sendingPrompts: removeSending(state.sendingPrompts, sessionId, id) })),
+  restorePrompt: (rejected) => {
+    const current = readDraft(rejected.sessionId);
+    const text = [rejected.text, current.text].filter(Boolean).join('\n\n');
+    writeDraft(rejected.sessionId, { text, ranges: [] });
+    const restored = new CustomEvent('lines:prompt-restored', { detail: rejected, cancelable: true });
+    window.dispatchEvent(restored);
+    if (!restored.defaultPrevented) {
+      void readDraftAttachments(rejected.sessionId).then((existing) =>
+        writeDraftAttachments(rejected.sessionId, [...(rejected.attachments ?? []), ...existing]));
+    }
+  },
   drainQueuedPrompts: () => {
     const queued = get().queuedPrompts;
     if (queued.length) set({ queuedPrompts: [] });
@@ -2718,6 +2764,12 @@ export const useStore = create<UiState>((set, get) => {
             // session's messages back to the machine that actually hosts it.
             sessionMachine: { ...state.sessionMachine, [msg.session.id]: from },
             seenSessionIds: withSeen(state.seenSessionIds, [msg.session.id]),
+            // A queue (or steer) change means the bridge took a prompt in.
+            sendingPrompts:
+              (prev?.queued?.length ?? 0) !== (msg.session.queued?.length ?? 0) ||
+              (prev?.steering?.length ?? 0) !== (msg.session.steering?.length ?? 0)
+                ? clearSent(state.sendingPrompts, msg.session.id)
+                : state.sendingPrompts,
             pendingCreate: claim ? false : state.pendingCreate,
             selectedSessionId: claim ? msg.session.id : state.selectedSessionId,
             focusComposerFor: claim ? msg.session.id : state.focusComposerFor,
@@ -2835,6 +2887,11 @@ export const useStore = create<UiState>((set, get) => {
         if (batch) batch.push(msg.event);
         else pendingEvents.set(msg.sessionId, [msg.event]);
         scheduleFlush();
+        // The bridge is answering for this session, so a prompt shown as "Sent"
+        // has arrived; its own bubble (or the queue row) takes over.
+        if (get().sendingPrompts[msg.sessionId]) {
+          set((state) => ({ sendingPrompts: clearSent(state.sendingPrompts, msg.sessionId) }));
+        }
         break;
       }
       case 'transcript':
@@ -3041,18 +3098,7 @@ export const useStore = create<UiState>((set, get) => {
         set({ folderPickPending: false, folderPickTarget: null });
         break;
       case 'error':
-        if (msg.rejectedPrompt) {
-          const rejected = msg.rejectedPrompt;
-          const current = readDraft(rejected.sessionId);
-          const text = [rejected.text, current.text].filter(Boolean).join('\n\n');
-          writeDraft(rejected.sessionId, { text, ranges: [] });
-          const restored = new CustomEvent('lines:prompt-restored', { detail: rejected, cancelable: true });
-          window.dispatchEvent(restored);
-          if (!restored.defaultPrevented) {
-            void readDraftAttachments(rejected.sessionId).then((existing) =>
-              writeDraftAttachments(rejected.sessionId, [...(rejected.attachments ?? []), ...existing]));
-          }
-        }
+        if (msg.rejectedPrompt) get().restorePrompt(msg.rejectedPrompt);
         console.error('[server]', msg.message);
         // Surfaced, not just logged: a server refusal is the only description of
         // what would have been lost (a dirty work tree, a branch that isn't merged),

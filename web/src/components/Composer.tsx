@@ -6,6 +6,7 @@ import {
   Button,
   Drawer,
   Group,
+  Loader,
   Menu,
   Modal,
   Paper,
@@ -82,22 +83,14 @@ import { send } from '../ws';
 import { formatElapsed, useVoiceDictation } from '../lib/useVoiceDictation';
 import { DictateButton, VoiceLimitNotice } from './DictateButton';
 import { useIsPhone } from '../lib/layout';
+import { prepareAttachment } from '../lib/imageDownscale';
 
-/** Read a File into a raw-base64 PromptAttachment (strips the data: URI prefix). */
+/**
+ * Read a File into a raw-base64 PromptAttachment, downscaling large photos
+ * first (see `prepareAttachment`). Kept here because QueuedMessages imports it.
+ */
 export function fileToAttachment(file: File): Promise<PromptAttachment> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const result = String(reader.result);
-      resolve({
-        name: file.name,
-        mediaType: file.type || 'application/octet-stream',
-        data: result.slice(result.indexOf(',') + 1),
-      });
-    };
-    reader.onerror = () => reject(reader.error);
-    reader.readAsDataURL(file);
-  });
+  return prepareAttachment(file);
 }
 
 /**
@@ -342,6 +335,9 @@ export function Composer({ session }: { session: SessionMeta }) {
   // remounts per session and the lazy initializer is enough to restore.
   const [prompt, setPrompt] = useState(() => readDraft(session.id));
   const [attachments, setAttachments] = useState<PromptAttachment[]>([]);
+  // Files picked but still being read or downscaled: shown as spinner tiles, and
+  // Send waits for them so ⌘/Enter cannot go out without the image.
+  const [pendingFiles, setPendingFiles] = useState<{ id: string; name: string }[]>([]);
   // Staged attachments load from IndexedDB asynchronously (unlike the text
   // draft, which reads synchronously in the initializer above) — this guards
   // the mirror-to-storage effect below from firing with an empty array and
@@ -413,7 +409,8 @@ export function Composer({ session }: { session: SessionMeta }) {
   // While dictating, Send finishes the recording and sends with the transcript,
   // so there is always something on its way.
   const nothingToSend = voice === 'idle' && !prompt.text.trim() && attachments.length === 0;
-  const cannotSend = nothingToSend || machineBlock !== null || !canPrompt;
+  const preparing = pendingFiles.length > 0;
+  const cannotSend = nothingToSend || preparing || machineBlock !== null || !canPrompt;
 
   // Focus the prompt on a session this tab just created. Keyed on the store's
   // create intent rather than `createdAt`, which is stamped on the bridge machine's
@@ -498,8 +495,21 @@ export function Composer({ session }: { session: SessionMeta }) {
   const addFiles = async (files: FileList | File[]) => {
     const list = Array.from(files);
     if (!list.length) return;
-    const encoded = await Promise.all(list.map(fileToAttachment));
-    setAttachments((a) => [...a, ...encoded]);
+    const placeholders = list.map((file) => ({ id: crypto.randomUUID(), name: file.name }));
+    setPendingFiles((p) => [...p, ...placeholders]);
+    // One at a time, not Promise.all: a phone decoding several 12MP photos at
+    // once stalls. Each tile swaps in as soon as its own file is ready.
+    for (const [i, file] of list.entries()) {
+      const { id } = placeholders[i];
+      try {
+        const att = await fileToAttachment(file);
+        setAttachments((a) => [...a, att]);
+      } catch {
+        useStore.getState().setActionError(`Couldn't attach ${file.name}.`);
+      } finally {
+        setPendingFiles((p) => p.filter((f) => f.id !== id));
+      }
+    }
   };
 
   const submit = (opts?: { queue?: boolean }) => {
@@ -763,7 +773,7 @@ export function Composer({ session }: { session: SessionMeta }) {
           </Text>
         </Stack>
       )}
-      {attachments.length > 0 && (
+      {(attachments.length > 0 || pendingFiles.length > 0) && (
         <Group gap="xs" px={6} pb={6}>
           {attachments.map((att, i) => (
             <PreviewTile
@@ -773,6 +783,30 @@ export function Composer({ session }: { session: SessionMeta }) {
               onRemove={() => setAttachments((a) => a.filter((_, j) => j !== i))}
             />
           ))}
+          {pendingFiles.map((f) => (
+            <Tooltip key={f.id} label={`Preparing ${f.name}…`}>
+              <Paper
+                withBorder
+                radius="md"
+                aria-label={`Preparing ${f.name}`}
+                style={{
+                  width: 64,
+                  height: 64,
+                  flexShrink: 0,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                }}
+              >
+                <Loader size="sm" />
+              </Paper>
+            </Tooltip>
+          ))}
+          {preparing && (
+            <Text size="xs" c="dimmed">
+              Preparing image…
+            </Text>
+          )}
         </Group>
       )}
       {suggestion && (

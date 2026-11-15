@@ -7,12 +7,15 @@ import {
   Group,
   Loader,
   Paper,
+  Progress,
   Stack,
   Text,
   Tooltip,
 } from '@mantine/core';
 import {
+  IconAlertTriangle,
   IconBolt,
+  IconCheck,
   IconCloudOff,
   IconPaperclip,
   IconPencil,
@@ -38,6 +41,7 @@ import { buildExpandedPrompt, mentionKindMeta, uniqueMentions } from '../lib/men
 import { useCan } from '../lib/can';
 import { useIdentityResolver } from '../lib/identity';
 import { useStore } from '../store';
+import type { SendingPrompt } from '../lib/sendingPrompts';
 import type { QueuedPrompt as LocalQueuedPrompt } from '../store';
 import { send } from '../ws';
 import { fileToAttachment } from './Composer';
@@ -607,6 +611,89 @@ export function OfflineQueuedMessages({ session }: { session: SessionMeta }) {
           </Group>
         </Paper>
       ))}
+    </Stack>
+  );
+}
+
+const NO_SENDING: SendingPrompt[] = [];
+
+function formatMegabytes(bytes: number): string {
+  const mb = bytes / (1024 * 1024);
+  return mb >= 1 ? `${mb.toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`;
+}
+
+/**
+ * Big prompts still leaving the browser. Covers the gap between Send clearing
+ * the composer and the bridge echoing the message, which on a phone uplink with
+ * a photo attached can be many seconds. "Sent" means the bytes left this
+ * browser; the row goes once the bridge answers for the session.
+ */
+export function SendingMessages({ session }: { session: SessionMeta }) {
+  const rows = useStore((s) => s.sendingPrompts[session.id] ?? NO_SENDING);
+  if (!rows.length) return null;
+
+  return (
+    <Stack gap={6} maw={920} mx="auto" w="100%" px="md" pb={4}>
+      {rows.map((item) => {
+        const pct = Math.round(item.progress * 100);
+        const status =
+          item.phase === 'encrypting'
+            ? 'Encrypting…'
+            : item.phase === 'sending'
+              ? `Sending · ${formatMegabytes(item.bytes)} · ${pct}%`
+              : item.phase === 'sent'
+                ? `Sent · ${formatMegabytes(item.bytes)}`
+                : 'Not sent — connection lost, restored to the composer';
+        return (
+          <Paper
+            key={item.id}
+            p="xs"
+            radius="md"
+            style={{ border: '1px dashed var(--mantine-color-default-border)' }}
+          >
+            <Stack gap={4}>
+              <Group justify="space-between" wrap="nowrap" gap="xs">
+                <Group gap={6} wrap="nowrap" style={{ minWidth: 0 }}>
+                  {item.phase === 'sent' ? (
+                    <IconCheck size={14} color="var(--mantine-color-green-6)" />
+                  ) : item.phase === 'failed' ? (
+                    <IconAlertTriangle size={14} color="var(--mantine-color-red-6)" />
+                  ) : (
+                    <Loader size={12} />
+                  )}
+                  <Text size="xs" c={item.phase === 'failed' ? 'red' : 'dimmed'} fw={600}>
+                    {status}
+                  </Text>
+                </Group>
+                {item.attachmentCount > 0 && (
+                  <Badge
+                    size="xs"
+                    variant="light"
+                    color="gray"
+                    leftSection={<IconPaperclip size={10} />}
+                    style={{ textTransform: 'none', flexShrink: 0 }}
+                  >
+                    {item.attachmentCount}
+                  </Badge>
+                )}
+              </Group>
+              {item.text && (
+                <Text size="sm" c="dimmed" lineClamp={2}>
+                  {item.text}
+                </Text>
+              )}
+              {(item.phase === 'encrypting' || item.phase === 'sending') && (
+                <Progress
+                  size="xs"
+                  value={item.phase === 'encrypting' ? 100 : pct}
+                  animated={item.phase === 'encrypting'}
+                  striped={item.phase === 'encrypting'}
+                />
+              )}
+            </Stack>
+          </Paper>
+        );
+      })}
     </Stack>
   );
 }

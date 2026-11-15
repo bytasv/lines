@@ -758,6 +758,46 @@ function flushQueue() {
   }
 }
 
+/** Upload progress callbacks for one `writeToLink` frame. */
+interface WriteProgress {
+  onProgress?(fraction: number, phase: 'encrypting' | 'sending'): void;
+  /** The frame left the browser: `bufferedAmount` drained. Not delivery. */
+  onDone?(): void;
+  /** The socket closed with the frame still (at least partly) buffered, or sealing failed. */
+  onFail?(): void;
+}
+
+const DRAIN_POLL_MS = 250;
+/** Bytes still buffered that count as drained: pings and other small frames written after ours. */
+const DRAIN_SLACK_BYTES = 4096;
+
+/**
+ * Follow one frame out of the browser through `socket.bufferedAmount`.
+ *
+ * Approximate on purpose: the count covers every frame queued on the socket, so
+ * frames written after ours (pings, a second prompt) delay "done". It measures
+ * bytes leaving this browser, never arrival at the bridge.
+ */
+function watchDrain(socket: WebSocket, opts: WriteProgress) {
+  const start = Math.max(socket.bufferedAmount, 1);
+  const tick = () => {
+    const buffered = socket.bufferedAmount;
+    if (buffered <= DRAIN_SLACK_BYTES) {
+      opts.onDone?.();
+      return;
+    }
+    // Closed with bytes still queued: they will never leave.
+    if (socket.readyState !== WebSocket.OPEN) {
+      opts.onFail?.();
+      return;
+    }
+    opts.onProgress?.(1 - buffered / start, 'sending');
+    setTimeout(tick, DRAIN_POLL_MS);
+  };
+  opts.onProgress?.(0, 'sending');
+  setTimeout(tick, DRAIN_POLL_MS);
+}
+
 /**
  * Write one already-serialised message to a machine.
  *
@@ -774,19 +814,27 @@ function flushQueue() {
  * as plaintext, the bridge read it as a downgrade and closed the channel, and the
  * link reconnected into the same loop a second later.
  */
-function writeToLink(link: MachineLink, payload: string): boolean {
+function writeToLink(link: MachineLink, payload: string, opts?: WriteProgress): boolean {
   if (link.socket?.readyState !== WebSocket.OPEN) return false;
   if (link.secure) {
     const session = link.secure;
     const socket = link.socket;
     link.sending = link.sending
       .then(async () => {
+        opts?.onProgress?.(0, 'encrypting');
         const sealed = await session.seal(payload);
         if (socket.readyState === WebSocket.OPEN) {
-          socket.send(JSON.stringify({ type: 'e2eeData', ...sealed } satisfies ClientMessage));
+          const frame = JSON.stringify({ type: 'e2eeData', ...sealed } satisfies ClientMessage);
+          socket.send(frame);
+          if (opts) watchDrain(socket, opts);
+        } else {
+          opts?.onFail?.();
         }
       })
-      .catch((err) => console.warn('[e2ee] send failed', err));
+      .catch((err) => {
+        console.warn('[e2ee] send failed', err);
+        opts?.onFail?.();
+      });
     return true;
   }
   // Held, never sent in the clear, while a pinned link has no session: that is
@@ -797,6 +845,7 @@ function writeToLink(link: MachineLink, payload: string): boolean {
     return true;
   }
   link.socket.send(payload);
+  if (opts) watchDrain(link.socket, opts);
   return true;
 }
 
@@ -1443,6 +1492,47 @@ const BACKGROUND_TYPES: ReadonlySet<ClientMessage['type']> = new Set<ClientMessa
   'recipeVersions',
 ]);
 
+/** A prompt frame at least this big (or carrying attachments) shows a sending row. */
+const TRACK_SEND_BYTES = 256 * 1024;
+/** A "Sent" row is cleared by the bridge's answer, or after this long regardless. */
+const SENT_ROW_TTL_MS = 15_000;
+
+/** Register a sending row for one prompt and return the callbacks that drive it. */
+function trackPromptSend(
+  msg: Extract<ClientMessage, { type: 'prompt' }>,
+  bytes: number,
+): WriteProgress & { id: string } {
+  const id = crypto.randomUUID();
+  const { sessionId } = msg;
+  const store = useStore.getState();
+  store.startSendingPrompt(sessionId, { id, text: msg.text, attachmentCount: msg.attachments?.length ?? 0, bytes });
+  let settled = false;
+  return {
+    id,
+    onProgress: (fraction, phase) => {
+      if (!settled) useStore.getState().updateSendingProgress(sessionId, id, fraction, phase);
+    },
+    onDone: () => {
+      if (settled) return;
+      settled = true;
+      useStore.getState().finishSendingPrompt(sessionId, id);
+      setTimeout(() => useStore.getState().removeSendingPrompt(sessionId, id), SENT_ROW_TTL_MS);
+    },
+    onFail: () => {
+      if (settled) return;
+      settled = true;
+      const s = useStore.getState();
+      s.failSendingPrompt(sessionId, id);
+      // Restored rather than lost: before this the prompt vanished, because
+      // `writeToLink` had already reported it written. If the bridge did get it
+      // before the close the user may send twice, which beats losing it.
+      s.restorePrompt(msg);
+      s.setActionError('Connection lost while sending — your message is back in the composer.');
+      setTimeout(() => useStore.getState().removeSendingPrompt(sessionId, id), 4000);
+    },
+  };
+}
+
 /** False when the message was dropped — the caller can then say so instead of
  *  leaving the user with a button that appears to do nothing. */
 export function send(msg: ClientMessage): boolean {
@@ -1456,7 +1546,21 @@ export function send(msg: ClientMessage): boolean {
   // outbox is dropped if that socket dies before the handshake finishes, and a
   // lost prompt is the single failure the queue exists to prevent.
   const buffersOnly = !!link?.expectsSecure && !link.secure;
-  if (link && !(msg.type === 'prompt' && buffersOnly) && writeToLink(link, JSON.stringify(msg))) return true;
+  if (link && !(msg.type === 'prompt' && buffersOnly)) {
+    const payload = JSON.stringify(msg);
+    // Big prompts get a visible "Sending…" row while their bytes leave the
+    // browser, and a close mid-upload hands them back to the draft instead of
+    // losing them. Only when the frame goes straight onto the socket: one held
+    // in the outbox has nothing to report yet.
+    const direct = link.socket?.readyState === WebSocket.OPEN && (!!link.secure || !(link.expectsSecure || link.pinned));
+    const tracked =
+      msg.type === 'prompt' && direct && (!!msg.attachments?.length || payload.length > TRACK_SEND_BYTES)
+        ? trackPromptSend(msg, payload.length)
+        : undefined;
+    if (writeToLink(link, payload, tracked)) return true;
+    // Not written after all: the durable queue below takes it, so the row goes.
+    if (tracked && msg.type === 'prompt') useStore.getState().removeSendingPrompt(msg.sessionId, tracked.id);
+  }
   if (msg.type === 'prompt') {
     // Only prompts are safe to replay blind; other control messages depend on live state.
     useStore.getState().enqueuePrompt({

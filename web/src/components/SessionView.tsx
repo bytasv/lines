@@ -51,7 +51,7 @@ import { transcriptHasMore } from '../lib/transcriptPage';
 import { clearTranscriptPageInFlight, requestTranscriptPage } from '../lib/transcriptBackfill';
 import { Composer } from './Composer';
 import { ReadOnlySessionNotice } from './ReadOnlySessionNotice';
-import { OfflineQueuedMessages, QueuedMessages, SteeringMessages } from './QueuedMessages';
+import { OfflineQueuedMessages, QueuedMessages, SendingMessages, SteeringMessages } from './QueuedMessages';
 import { WorkflowStepper } from './WorkflowStepper';
 import { ShareModal } from './ShareModal';
 import { MachineDot } from './MachineDot';
@@ -429,6 +429,7 @@ export function SessionView({ sessionId }: { sessionId: string }) {
       <SteeringMessages session={session} />
       <QueuedMessages session={session} />
       <OfflineQueuedMessages session={session} />
+      <SendingMessages session={session} />
       {session.readOnly ? <ReadOnlySessionNotice /> : <Composer session={session} />}
       {sharing && deviceId && (
         <ShareModal

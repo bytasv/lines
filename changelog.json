@@ -1,6 +1,16 @@
 {
   "web": [
     {
+      "version": "0.1.38",
+      "date": "2026-11-15",
+      "items": [
+        {
+          "text": "Attaching a big photo now shows a tile right away, shrinks it so it uploads faster, and shows sending progress; if the connection drops mid-send, the message comes back to the box.",
+          "image": "web-0.1.38-photo-upload.png"
+        }
+      ]
+    },
+    {
       "version": "0.1.37",
       "date": "2026-10-28",
       "items": [

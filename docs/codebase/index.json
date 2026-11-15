@@ -3046,6 +3046,8 @@
         "web/src/components/recipe/RecipeRunModal.tsx",
         "web/src/components/recipe/RecipeImages.tsx",
         "web/src/lib/recipeImage.ts",
+        "web/src/lib/imageDownscale.ts",
+        "web/src/lib/imageDownscalePolicy.ts",
         "web/src/components/workflow/WorkflowEditor.tsx",
         "web/src/components/workflow/UntrustedReview.tsx",
         "server/src/sessions.ts",
@@ -5042,6 +5044,66 @@
         "brand-logo",
         "settings-updates-pane",
         "desktop-app"
+      ]
+    },
+    {
+      "id": "composer-attachments",
+      "name": "Composer attachments",
+      "doc": "features/composer-attachments.md",
+      "purpose": "Immediate feedback when picking and sending images: large photos are downscaled in the browser, a tile shows at once, and a sending row tracks bytes leaving the browser over a remote link, restoring the prompt if the connection drops mid-send.",
+      "entryPoints": [
+        "web/src/components/Composer.tsx",
+        "web/src/ws.ts",
+        "web/src/components/QueuedMessages.tsx"
+      ],
+      "files": [
+        "web/src/lib/imageDownscale.ts",
+        "web/src/lib/imageDownscalePolicy.ts",
+        "web/src/lib/recipeImage.ts",
+        "web/src/lib/sendingPrompts.ts",
+        "web/src/store.ts",
+        "web/src/ws.ts",
+        "web/src/components/Composer.tsx",
+        "web/src/components/QueuedMessages.tsx",
+        "web/src/components/SessionView.tsx",
+        "shared/types.ts"
+      ],
+      "symbols": [
+        "prepareAttachment",
+        "downscaleImage",
+        "shouldDownscale",
+        "targetSize",
+        "fileToAttachment",
+        "startSending",
+        "progressSending",
+        "finishSending",
+        "failSending",
+        "clearSent",
+        "writeToLink",
+        "trackPromptSend",
+        "restorePrompt",
+        "SendingMessages"
+      ],
+      "tests": [
+        "server/src/imageDownscale.test.ts"
+      ],
+      "businessRules": [
+        "only JPEG, PNG, WebP, HEIC and HEIF are re-encoded; GIF, SVG and non-images are sent as they are",
+        "an image of at most 1 MB with a long edge of at most 2048 px is sent byte-identical",
+        "larger images are scaled to a 2048 px long edge as JPEG at 0.85, and PNG stays PNG when the result is at most 1.5 MB",
+        "an image that cannot be decoded or encoded, or would grow, is sent as its original bytes; attaching never fails because of resizing",
+        "Send and Cmd/Enter stay disabled while any picked file is still being prepared",
+        "a Sent row means the bytes left the browser, not that the bridge received them",
+        "a connection that closes mid-send restores the prompt and its attachments to the draft"
+      ],
+      "architecturalRules": [
+        "resize policy lives in the DOM-free imageDownscalePolicy.ts so server tests can import it; canvas and FileReader code stays in imageDownscale.ts",
+        "sending-row transitions are pure functions over the store map; the store only wires them to events",
+        "writeToLink progress callbacks are optional, so existing callers are unchanged"
+      ],
+      "relatedDecisions": [
+        "session-and-project-ui",
+        "end-to-end-encryption"
       ]
     }
   ]
