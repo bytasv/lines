@@ -26,6 +26,7 @@ import {
   IconFilePencil,
   IconMap,
   IconMessagePlus,
+  IconMessageQuestion,
   IconPencil,
   IconPlugConnected,
   IconPointFilled,
@@ -39,6 +40,7 @@ import type {
   McpVetting,
   PermissionRequestData,
   PermissionResolutionSource,
+  PlanChatEventData,
   PlanComment,
 } from '@lines/shared';
 import {
@@ -49,14 +51,15 @@ import {
 } from '@lines/shared';
 import { send } from '../ws';
 import { readPlanComments, useStore, writePlanComments } from '../store';
-import { agentLabel } from '../lib/capabilities';
+import { agentLabel, sessionCaps } from '../lib/capabilities';
 import { permissionModeLabel } from '../lib/permissionModes';
-import { useCan, useIsGuestOnSession } from '../lib/can';
+import { useCan, useCanOnSession, useIsGuestOnSession } from '../lib/can';
 import { appendTranscript, useVoiceDictation } from '../lib/useVoiceDictation';
 import { DictateButton, DictationError, dictateSectionWidth } from './DictateButton';
 import { useIsPhone } from '../lib/layout';
 import { useIdentityResolver } from '../lib/identity';
 import { QuestionPrompt } from './QuestionPrompt';
+import { PlanChat } from './PlanChat';
 import { Markdown } from './Markdown';
 import { computeDiff, isEditTool, type ToolBlock } from '../lib/transcript';
 import { useFileContent } from '../lib/files';
@@ -701,6 +704,7 @@ function CommentablePlan({
   onDeleteComment,
   scrollRequest,
   fz,
+  onAsk,
 }: {
   /** Whose machine transcribes a dictated note. */
   sessionId: string;
@@ -724,6 +728,12 @@ function CommentablePlan({
    */
   scrollRequest?: { id: string; nonce: number } | null;
   fz?: string;
+  /**
+   * Ask the plan side-chat about the selected passage. Absent where asking is
+   * not available (a guest without the right, a codex session), which hides the
+   * action entirely.
+   */
+  onAsk?: (quote: string) => void;
 }) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const [pending, setPending] = useState<{ quote: string; left: number; top: number } | null>(null);
@@ -1099,20 +1109,43 @@ function CommentablePlan({
         </Paper>
       )}
       {pending && !editing && (
-        <Tooltip label="Comment on this passage">
-          <ActionIcon
-            size="sm"
-            variant="filled"
-            data-plan-chrome
-            style={{ position: 'absolute', left: pending.left, top: pending.top + 4, zIndex: 3 }}
-            // The click must not collapse the selection before we have read it.
-            onMouseDown={(e) => e.preventDefault()}
-            onClick={() => setEditing(true)}
-            aria-label="Comment on this passage"
-          >
-            <IconMessagePlus size={14} />
-          </ActionIcon>
-        </Tooltip>
+        <Group
+          gap={4}
+          wrap="nowrap"
+          data-plan-chrome
+          style={{ position: 'absolute', left: pending.left, top: pending.top + 4, zIndex: 3 }}
+        >
+          <Tooltip label="Comment on this passage">
+            <ActionIcon
+              size="sm"
+              variant="filled"
+              // The click must not collapse the selection before we have read it.
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => setEditing(true)}
+              aria-label="Comment on this passage"
+            >
+              <IconMessagePlus size={14} />
+            </ActionIcon>
+          </Tooltip>
+          {onAsk && (
+            <Tooltip label="Ask about this">
+              <ActionIcon
+                size="sm"
+                variant="filled"
+                color="violet"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => {
+                  onAsk(pending.quote);
+                  window.getSelection()?.removeAllRanges();
+                  close();
+                }}
+                aria-label="Ask about this passage"
+              >
+                <IconMessageQuestion size={14} />
+              </ActionIcon>
+            </Tooltip>
+          )}
+        </Group>
       )}
       {pending && editing && (
         <Paper
@@ -1181,10 +1214,12 @@ function PlanApproval({
   sessionId,
   data,
   resolution,
+  planChat,
 }: {
   sessionId: string;
   data: PermissionRequestData;
   resolution?: Resolution;
+  planChat?: PlanChatEventData[];
 }) {
   const agent = useStore((s) => {
     const meta = s.sessions[sessionId];
@@ -1246,6 +1281,29 @@ function PlanApproval({
     dismissed.current = true;
     setFocus(false);
   };
+
+  // The plan side-chat. Asking needs what a plan comment needs — `prompt` and
+  // `approvePermissions`, without prompts held for the owner's approval — plus a
+  // provider that can fork without touching the live turn. The history stays
+  // readable to everyone once it exists, and after the card is answered.
+  const mayPrompt = useCanOnSession(sessionId, 'prompt');
+  const mayApprove = useCanOnSession(sessionId, 'approvePermissions');
+  const needsApproval = useStore((s) => s.access?.caps.promptNeedsApproval === true);
+  const sideChatCap = useStore((s) => {
+    const meta = s.sessions[sessionId];
+    return meta ? sessionCaps(meta).planSideChat : false;
+  });
+  const canAsk = !resolution && sideChatCap && mayPrompt && mayApprove && !needsApproval;
+  const chatEntries = planChat ?? [];
+  const [chat, setChat] = useState<{ open: boolean; quote?: string }>({ open: false });
+  const openChat = (quote?: string) => {
+    dismissed.current = false;
+    setFocus(true);
+    setChat((c) => ({ open: true, quote: quote ?? c.quote }));
+  };
+  const onAsk = canAsk ? (quote: string) => openChat(quote) : undefined;
+  const chatOpen = chat.open && (canAsk || chatEntries.length > 0);
+  const isPhone = useIsPhone();
 
   const toggle = () => {
     if (hasPlan) setExpanded((v) => !v);
@@ -1592,9 +1650,23 @@ function PlanApproval({
                 // The focus-mode copy is on top when it is open; only the one the
                 // user can actually see may scroll itself.
                 scrollRequest={scrollRequest?.focus === false ? scrollRequest : null}
+                onAsk={onAsk}
               />
             </Paper>
           </ScrollArea.Autosize>
+          {chatEntries.length > 0 && (
+            <Button
+              size="compact-xs"
+              variant="subtle"
+              color="violet"
+              mt={6}
+              leftSection={<IconMessageQuestion size={12} />}
+              onClick={() => openChat()}
+            >
+              {chatEntries.filter((e) => e.role === 'question').length} question
+              {chatEntries.filter((e) => e.role === 'question').length === 1 ? '' : 's'} about this plan
+            </Button>
+          )}
           {/* Buttons never render for a dead requestId. */}
           {!resolution && commentList}
           {!resolution && <Box mt="sm">{renderActions('xs')}</Box>}
@@ -1625,11 +1697,33 @@ function PlanApproval({
               <IconMap size={18} color="var(--mantine-color-violet-5)" />
               <Text fw={700}>Plan review</Text>
             </Group>
-            <Button variant="subtle" color="gray" size="xs" onClick={dismissFocus}>
-              Exit focus (Esc)
-            </Button>
+            <Group gap="xs">
+              {(canAsk || chatEntries.length > 0) && !chatOpen && (
+                <Button
+                  variant="light"
+                  color="violet"
+                  size="xs"
+                  leftSection={<IconMessageQuestion size={14} />}
+                  onClick={() => openChat()}
+                >
+                  Ask{chatEntries.length > 0 ? ` (${chatEntries.filter((e) => e.role === 'question').length})` : ''}
+                </Button>
+              )}
+              <Button variant="subtle" color="gray" size="xs" onClick={dismissFocus}>
+                Exit focus (Esc)
+              </Button>
+            </Group>
           </Group>
-          <ScrollArea style={{ flex: 1 }}>
+          <Box
+            style={{
+              flex: 1,
+              minHeight: 0,
+              display: 'flex',
+              // The plan moves aside for the chat; on a phone it moves up instead.
+              flexDirection: isPhone ? 'column' : 'row',
+            }}
+          >
+          <ScrollArea style={{ flex: 1, minHeight: 0 }}>
             <Box maw={760} mx="auto" px="xl" pb="xl">
               <CommentablePlan
                 sessionId={sessionId}
@@ -1645,10 +1739,37 @@ function PlanApproval({
                 onDeleteComment={removeComment}
                 scrollRequest={scrollRequest?.focus ? scrollRequest : null}
                 fz="md"
+                onAsk={onAsk}
               />
               {!resolution && commentList}
             </Box>
           </ScrollArea>
+          {chatOpen && (
+            <Box
+              style={
+                isPhone
+                  ? { height: '50%', minHeight: 0, borderTop: '1px solid var(--mantine-color-default-border)' }
+                  : {
+                      width: 420,
+                      flexShrink: 0,
+                      minHeight: 0,
+                      borderLeft: '1px solid var(--mantine-color-default-border)',
+                    }
+              }
+            >
+              <PlanChat
+                sessionId={sessionId}
+                requestId={data.requestId}
+                entries={chatEntries}
+                canAsk={canAsk}
+                quote={chat.quote}
+                onClearQuote={() => setChat((c) => ({ ...c, quote: undefined }))}
+                onAddComment={resolution ? undefined : addComment}
+                onClose={() => setChat({ open: false })}
+              />
+            </Box>
+          )}
+          </Box>
           {/* A resolved plan opens read-only — the footer and its border go with the buttons. */}
           {!resolution && (
             <Group
@@ -1669,10 +1790,13 @@ export function PermissionPrompt({
   sessionId,
   data,
   resolution,
+  planChat,
 }: {
   sessionId: string;
   data: PermissionRequestData;
   resolution?: Resolution;
+  /** ExitPlanMode only: the plan side-chat's history (see PlanChat). */
+  planChat?: PlanChatEventData[];
 }) {
   // What to call the agent in this card's copy. A primitive from the selector, so
   // a card does not re-render on unrelated session changes.
@@ -1687,7 +1811,7 @@ export function PermissionPrompt({
   }
   // Plans get a full-screen distraction-free review mode.
   if (data.toolName === 'ExitPlanMode') {
-    return <PlanApproval sessionId={sessionId} data={data} resolution={resolution} />;
+    return <PlanApproval sessionId={sessionId} data={data} resolution={resolution} planChat={planChat} />;
   }
 
   const p = toolPresentation(data, agent);

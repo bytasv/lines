@@ -164,7 +164,7 @@
       "id": "permissions-and-plan-mode",
       "name": "Permissions and plan mode",
       "doc": "features/permissions-and-plan-mode.md",
-      "purpose": "What decides whether a tool call runs, who decided it, and how plan mode's deliverable is written and reviewed: mode pickers, resolution provenance, the synced auto-mode allowlist (what an entry covers, and the exact entry \"Always allow\" saves), symlink-aware path checks, files that run code later always asking, plan-file auto-approval, the reopenable plan card, a typed reply counting as \"keep planning\" (or a decline after leaving plan mode), and a mode switch deferred while a plan is pending.",
+      "purpose": "What decides whether a tool call runs, who decided it, and how plan mode's deliverable is written and reviewed: mode pickers, resolution provenance, the synced auto-mode allowlist (what an entry covers, and the exact entry \"Always allow\" saves), symlink-aware path checks, files that run code later always asking, plan-file auto-approval, the reopenable plan card, a typed reply counting as \"keep planning\" (or a decline after leaving plan mode), and a mode switch deferred while a plan is pending. Plan side-chat: questions about a pending plan card answered by a forked, read-only copy of the conversation, streamed live and saved to the transcript.",
       "covers": [
         "permission-mode-selector",
         "permission-resolution-provenance",
@@ -175,7 +175,8 @@
         "plan-comments",
         "plan-mode-reads",
         "plan-mode-write-rejection",
-        "plan-mode-ai-read-check"
+        "plan-mode-ai-read-check",
+        "plan-side-chat"
       ],
       "entryPoints": [
         "web/src/components/Composer.tsx",
@@ -188,7 +189,9 @@
         "web/src/components/GuardAllowlistReviewModal.tsx",
         "server/src/autoGuard.ts",
         "Selecting text inside the plan card (PlanApproval / CommentablePlan)",
-        "permissionResponse.planComments"
+        "permissionResponse.planComments",
+        "web/src/components/PlanChat.tsx",
+        "server/src/planSideChat.ts"
       ],
       "files": [
         "shared/types.ts",
@@ -211,7 +214,9 @@
         "web/src/lib/files.ts",
         "web/src/components/Transcript.tsx",
         "server/src/guestWorkflows.ts",
-        "web/src/lib/can.ts"
+        "web/src/lib/can.ts",
+        "server/src/planSideChat.ts",
+        "web/src/components/PlanChat.tsx"
       ],
       "symbols": [
         "PermissionMode",
@@ -290,7 +295,13 @@
         "useIsGuestOnSession",
         "DECLINE_PLAN_MESSAGE",
         "declinePlanReason",
-        "planReplyDecision"
+        "planReplyDecision",
+        "planChatAnchor",
+        "planChatToolDecision",
+        "askPlanChat",
+        "PlanChat",
+        "PlanChatEventData",
+        "runPlanChatTurn"
       ],
       "tests": [
         "server/src/autoGuard.plan.test.ts",
@@ -302,7 +313,8 @@
         "server/src/index.planFile.test.ts",
         "server/src/sessions.queue.test.ts",
         "server/src/autoGuard.paths.test.ts",
-        "server/src/guestAccess.test.ts"
+        "server/src/guestAccess.test.ts",
+        "server/src/planSideChat.test.ts"
       ],
       "businessRules": [
         "every picker (composer/settings pills, workflow step Select, recipe run modal, MCP save_step) offers only Plan, Assist and Full Auto; all five PermissionMode values stay valid and in PERMISSION_MODES for labels, and a step holding legacy default/acceptEdits shows it as an extra Select option via permissionModeSelectData; new steps and presets default to auto",
@@ -360,7 +372,14 @@
         "a mode switch while an ExitPlanMode card is live is recorded in meta only and never pushed to the CLI; the card stays pending and the session stays waiting-permission",
         "approving a plan after such a switch implements in the picked mode, capped by permissionCeiling; a configured workflow plan step still gates and advances",
         "a typed reply to a pending plan in a non-plan mode declines the plan (declinePlanReason) and becomes the task; the picked mode is pushed to the worker only after that deny resolves",
-        "the Keep planning button after such a switch sets meta back to 'plan' and pushes nothing"
+        "the Keep planning button after such a switch sets meta back to 'plan' and pushes nothing",
+        "a plan side-chat question never writes a 'user' event, calls prompt(), reaches the worker, changes session status, or moves the resume pointer, so Retry never re-sends it",
+        "the plan side-chat's tools are allowed only when planChatToolDecision accepts them, enforced in both a PreToolUse hook and canUseTool; everything else is denied with a fixed message and never raises a card",
+        "one plan side-chat question per ExitPlanMode card is in flight; a second is refused",
+        "asking a plan side-chat question requires prompt and approvePermissions, and no promptNeedsApproval; history stays readable after the card resolves",
+        "resolving the card aborts an in-flight plan side-chat question",
+        "plan side-chat partial answers are broadcast only and never persisted; the final answer is the saved record",
+        "plan side-chat is Claude-only; the planSideChat capability is false for codex"
       ],
       "architecturalRules": [
         "single shared PERMISSION_MODES list — no component defines its own label/description array; PERMISSION_MODE_SEGMENTS is a three-item, independently-ordered subset (plan, auto, bypassPermissions) built by mapping over that subset, not by filtering PERMISSION_MODES",
@@ -393,7 +412,9 @@
         "pushIntoLiveTurn is the pushTurnSafely(..., {intoLiveTurn:true}) call extracted out of interjectQueued so the plan-comments approval path can reuse it",
         "the keep-planning wording has exactly one builder, keepPlanningReason (paired with PLAN_REPLY_MARKER) in shared/types.ts, shared by the build side (server) and the parse side (web's planReplyText) so the two can never drift",
         "plan-comment drafts follow the composer-draft localStorage pattern, keyed by session id and requestId",
-        "the highlight paint uses the CSS Custom Highlight API rather than DOM mutation, since the plan markdown re-renders on mount and on every live re-read of the plan file"
+        "the highlight paint uses the CSS Custom Highlight API rather than DOM mutation, since the plan markdown re-renders on mount and on every live re-read of the plan file",
+        "the plan side-chat runs on the bridge via the SDK query(), never through the worker, so the worker's per-session query map and handleWorkerEvent are untouched",
+        "the plan side-chat forks before the pending ExitPlanMode tool_use (upToMessageId is inclusive), so the dangling call is excluded from the fork"
       ],
       "relatedDecisions": [
         "session-collaboration",
@@ -1455,7 +1476,8 @@
         "a system/init row only renders when the model actually differs from the previous init the transcript saw, not once per turn (the CLI process restarts every turn); the first init in a transcript always renders (\"session started · model\"), a later one only on a genuine model change and reads \"model set to model\" instead — a cross-provider switch is a separate ProviderSwitchItem marker and is unaffected",
         "a successful turn's cost and duration render as chips on the turn's header (Compact level) rather than their own centered row; a turn with no header card (text-only, or Full/Grouped level) shows them as a small right-aligned dimmed meta line instead — a failed, stopped, or recovering turn keeps its centered row, error text, and Retry affordance unchanged",
         "only three workflow-marker events render in the transcript: started, a failure park (waiting-approval with failed or missingOutputs), and workflow-done; a clean park, an approve, a retry, and an interrupt leave no transcript trace since the stepper and the approve card already show that state live, and the emitted/stored event set is unchanged",
-        "buildTranscript may see a suffix-only event list until paged backfill completes; cross-turn derivations (CostLineage, sessionPlanWrite fallback, lastInitModel de-duplication, background tasks opened in older history) are transient until then"
+        "buildTranscript may see a suffix-only event list until paged backfill completes; cross-turn derivations (CostLineage, sessionPlanWrite fallback, lastInitModel de-duplication, background tasks opened in older history) are transient until then",
+        "'plan-chat' events attach to the ExitPlanMode permission item they name and never render as rows of their own"
       ],
       "architecturalRules": [
         "user and agent transcript text share one markdown renderer instead of separate text-rendering paths; ColorizedText.tsx deleted as dead code",
@@ -3651,7 +3673,8 @@
         "context-window",
         "session-collaboration",
         "workflow-step-lifecycle",
-        "cross-provider-model-switching"
+        "cross-provider-model-switching",
+        "permissions-and-plan-mode"
       ]
     },
     {

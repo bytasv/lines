@@ -1127,3 +1127,175 @@ test('accept-edits leaves an ordinary project edit to the CLI', async () => {
   await h.sessions.handleWorkerRpc(preToolUse({ file_path: `${cwd}/src/app.ts` }));
   assert.deepEqual(h.answered[0], { continue: true });
 });
+
+// ---------------------------------------------------------------------------
+// Plan side-chat — a forked, read-only question about a pending plan card that
+// must leave the live turn, the retry text and the turn scans untouched
+// ---------------------------------------------------------------------------
+
+const assistantSdk = (uuid: string, content: unknown[]): TranscriptEvent =>
+  ev('sdk', { type: 'assistant', uuid, parent_tool_use_id: null, message: { content } });
+
+/** A plan-mode session parked on ExitPlanMode `p1`, with the side query stubbed. */
+async function planChatHarness() {
+  const h = harness({
+    mode: 'plan',
+    events: [
+      ev('user', { text: 'plan the thing' }),
+      assistantSdk('a1', [{ type: 'text', text: 'Here is my plan.' }]),
+      assistantSdk('a2', [{ type: 'tool_use', id: 't1', name: 'ExitPlanMode', input: { plan: 'P' } }]),
+    ],
+  });
+  h.s1().claudeSessionId = 'cli-1';
+  const forks: { id: string; upToMessageId?: string }[] = [];
+  h.sessions.forkSession = (async (id: string, opts?: { upToMessageId?: string }) => {
+    forks.push({ id, upToMessageId: opts?.upToMessageId });
+    return { sessionId: `fork-${forks.length}` };
+  }) as never;
+  const asks: { forkSessionId: string; prompt: string; signal: AbortSignal }[] = [];
+  /** Resolvers for the stubbed side queries, in order; each answers its ask. */
+  const replies: ((text: string) => void)[] = [];
+  h.sessions.planChatRunner = (req) =>
+    new Promise((resolve, reject) => {
+      asks.push(req);
+      req.signal.addEventListener('abort', () => reject(new Error('aborted')));
+      replies.push((text) => resolve({ text, sessionId: req.forkSessionId, costUsd: 0.01 }));
+    });
+  void h.sessions.handleWorkerRpc(
+    canUseToolWith('p1', 'ExitPlanMode', { plan: 'Step 1. Do the thing.' }),
+  );
+  await settle();
+  const chat = () =>
+    (h.sessions as unknown as { store: { loadTranscript(id: string): TranscriptEvent[] } }).store
+      .loadTranscript('s1')
+      .filter((e) => e.kind === 'plan-chat')
+      .map((e) => e.data as { role: string; text: string; askId: string; forkSessionId?: string });
+  return { ...h, forks, asks, replies, chat };
+}
+
+/** Long enough for the fork, the runner and the answer's emit to chain through. */
+async function settleLong() {
+  for (let i = 0; i < 4; i++) {
+    await settle();
+    await new Promise((r) => setImmediate(r));
+  }
+}
+
+test('a side question on a pending plan forks once and records question and answer', async () => {
+  const h = await planChatHarness();
+  const statusBefore = h.s1().status;
+  const retryBefore = h.sessions.lastPromptForRetry('s1');
+  const pushesBefore = h.pushes.length;
+
+  const got = h.sessions.askPlanChat('s1', 'p1', { askId: 'q1', text: 'why?', quote: 'Step 1' });
+  assert.deepEqual(got, { ok: true });
+  await settleLong();
+  assert.deepEqual(h.forks, [{ id: 'cli-1', upToMessageId: 'a1' }], 'anchored before the ExitPlanMode call');
+  assert.equal(h.asks[0].forkSessionId, 'fork-1');
+  assert.match(h.asks[0].prompt, /Step 1\. Do the thing\./, 'the first ask carries the plan text');
+  assert.match(h.asks[0].prompt, /Regarding this part of the plan: "Step 1"/);
+  h.replies[0]('Because.');
+  await settleLong();
+
+  assert.deepEqual(
+    h.chat().map((c) => [c.role, c.text]),
+    [
+      ['question', 'why?'],
+      ['answer', 'Because.'],
+    ],
+  );
+  assert.equal(h.chat()[1].forkSessionId, 'fork-1');
+  assert.equal(h.pushes.length, pushesBefore, 'nothing reached the worker');
+  assert.equal(h.s1().status, statusBefore, 'status untouched');
+  assert.deepEqual(h.sessions.lastPromptForRetry('s1'), retryBefore, 'a Retry never re-sends a side question');
+  assert.equal(h.cards().filter((c) => c.resolution).length, 0, 'the card stays pending');
+});
+
+test('a second side question resumes the same fork', async () => {
+  const h = await planChatHarness();
+  h.sessions.askPlanChat('s1', 'p1', { askId: 'q1', text: 'why?' });
+  await settleLong();
+  h.replies[0]('Because.');
+  await settleLong();
+  assert.deepEqual(h.sessions.askPlanChat('s1', 'p1', { askId: 'q2', text: 'and?' }), { ok: true });
+  await settleLong();
+
+  assert.equal(h.forks.length, 1, 'forked once');
+  assert.equal(h.asks[1].forkSessionId, 'fork-1');
+  assert.ok(!h.asks[1].prompt.includes('Step 1. Do the thing.'), 'the plan rides only the first ask');
+});
+
+test('a second side question while one is in flight is refused', async () => {
+  const h = await planChatHarness();
+  h.sessions.askPlanChat('s1', 'p1', { askId: 'q1', text: 'why?' });
+  const got = h.sessions.askPlanChat('s1', 'p1', { askId: 'q2', text: 'and?' });
+  assert.equal(got.ok, false);
+});
+
+test('a side question on a resolved or unknown plan is refused', async () => {
+  const h = await planChatHarness();
+  assert.equal(h.sessions.askPlanChat('s1', 'nope', { askId: 'q1', text: 'why?' }).ok, false);
+  h.sessions.resolvePermission('s1', 'p1', true);
+  await settle();
+  assert.equal(h.sessions.askPlanChat('s1', 'p1', { askId: 'q1', text: 'why?' }).ok, false);
+  assert.deepEqual(h.chat(), [], 'a refused ask writes nothing');
+});
+
+test('answering the plan aborts the side question in flight', async () => {
+  const h = await planChatHarness();
+  h.sessions.askPlanChat('s1', 'p1', { askId: 'q1', text: 'why?' });
+  await settleLong();
+  assert.equal(h.asks.length, 1);
+  h.sessions.resolvePermission('s1', 'p1', false, undefined, undefined, KEEP_PLANNING_MESSAGE);
+  await settleLong();
+
+  assert.equal(h.asks[0].signal.aborted, true);
+  assert.deepEqual(
+    h.chat().map((c) => c.role),
+    ['question', 'error'],
+  );
+});
+
+test('a side question writes no user event and leaves the turn scans alone', async () => {
+  const h = await planChatHarness();
+  h.sessions.askPlanChat('s1', 'p1', { askId: 'q1', text: 'why?' });
+  await settleLong();
+  h.replies[0]('Because.');
+  await settleLong();
+  const events = (h.sessions as unknown as { store: { loadTranscript(id: string): TranscriptEvent[] } }).store
+    .loadTranscript('s1');
+  assert.equal(events.filter((e) => e.kind === 'user').length, 1, 'only the seeded prompt');
+  assert.equal(events.filter((e) => e.kind === 'interject').length, 0);
+});
+
+test('cancelling with nothing in flight closes a question a restart left unanswered', async () => {
+  const h = await planChatHarness();
+  h.sessions.emitEvent('s1', 'plan-chat', { requestId: 'p1', askId: 'q0', role: 'question', text: 'lost', at: 0 });
+  h.sessions.cancelPlanChat('s1', 'p1');
+  assert.deepEqual(
+    h.chat().map((c) => [c.role, c.askId]),
+    [
+      ['question', 'q0'],
+      ['error', 'q0'],
+    ],
+  );
+});
+
+test('a streaming side answer is never written to the transcript, only its final text', async () => {
+  const h = await planChatHarness();
+  h.sessions.planChatRunner = async (req) => {
+    req.onPartial?.({ text: 'Bec' });
+    req.onPartial?.({ text: 'Because' });
+    return { text: 'Because.', sessionId: req.forkSessionId };
+  };
+  h.sessions.askPlanChat('s1', 'p1', { askId: 'q1', text: 'why?' });
+  await settleLong();
+  await new Promise((r) => setTimeout(r, 150));
+  assert.deepEqual(
+    h.chat().map((c) => [c.role, c.text]),
+    [
+      ['question', 'why?'],
+      ['answer', 'Because.'],
+    ],
+  );
+});

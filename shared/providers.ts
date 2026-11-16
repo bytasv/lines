@@ -58,6 +58,12 @@ export interface ProviderCapabilities {
    * not keep honest.
    */
   reasoningEfforts: readonly ReasoningEffort[];
+  /**
+   * A pending plan card can be asked side questions by a forked, read-only copy
+   * of the session's conversation (`server/src/planSideChat.ts`). Off for codex
+   * until it has a fork that does not rebind the live thread.
+   */
+  planSideChat: boolean;
 }
 
 const ANTHROPIC: ProviderCapabilities = {
@@ -73,6 +79,7 @@ const ANTHROPIC: ProviderCapabilities = {
   cost: true,
   // The Agent SDK's top-level `effort` option (`EffortLevel` in sdk.d.ts).
   reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+  planSideChat: true,
 };
 
 /**
@@ -123,6 +130,9 @@ const OPENAI: ProviderCapabilities = {
   // already expressed by the field being absent, which hands the turn to codex's
   // own preset rather than turning reasoning off.
   reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+  // `forkCodex` rebinds the live session to the fork, which a side chat must
+  // never do while the plan review is open.
+  planSideChat: false,
 };
 
 const TABLE: Record<ModelProvider, ProviderCapabilities> = {

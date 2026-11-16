@@ -35,12 +35,15 @@ export function ActivityRow({
   startedAt,
   live,
   lastEventAt,
+  text,
 }: {
   /** ms epoch of turn start (SessionMeta.turnStartedAt or last user event ts). */
   startedAt?: number;
   live: LiveActivity | null;
   /** ms epoch of the last server event for this session; drives the no-output warning. */
   lastEventAt?: number;
+  /** Phase text to show instead of the one derived from `live` (the plan side-chat's). */
+  text?: string;
 }) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -68,7 +71,7 @@ export function ActivityRow({
               {named ? ` ${agent.label}: ` : ' '}
             </Text>
           )}
-          <span className="lines-shimmer-text">{label(live)}</span>
+          <span className="lines-shimmer-text">{text ?? label(live)}</span>
           {elapsed != null ? ` · ${elapsed}s` : ''}
           {quiet != null && quiet > QUIET_WARN_S && (
             <Text span size="sm" c={quiet > QUIET_ALARM_S ? 'orange' : 'dimmed'}>

@@ -158,6 +158,13 @@ The confirm dialog names this before the click: which model the rewind falls bac
 whether that conversation is still forkable or the session will start fresh there — the
 same “still on this machine?” uncertainty the switch itself carries.
 
+### Second caller of forkSession
+
+The plan side-chat also forks the CLI conversation (see
+[permissions-and-plan-mode](permissions-and-plan-mode.md#plan-side-chat)). It anchors on the message
+before the pending plan's tool call and never truncates or re-points the session, so rewind's
+anchor rules do not apply to it.
+
 ## Dependencies
 
 - `@anthropic-ai/claude-agent-sdk`'s `forkSession(sessionId, { upToMessageId, dir })` — copies a

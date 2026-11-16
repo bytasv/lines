@@ -340,6 +340,14 @@ transcript file's lines. One subtype is exempted from the drop: a `system/status
 a `compact_result` field is the authoritative compaction verdict and is always persisted, matching
 the separate durable `context-compact` event this doc's compaction handling already relies on.
 
+### Plan side-chat on a plan card
+
+`'plan-chat'` events have no row of their own. `buildTranscript` attaches them to the permission
+item for the ExitPlanMode card they name, so the card's chat history is part of that item. A partial
+answer replaces the previous partial for the same question, and `reuseItem` compares the attached
+list so the card re-renders as the chat grows. Compaction spans let these events through, since
+they belong to the card and not to the compaction.
+
 ## Dependencies
 
 - `remark-gfm` — the remark-side plugin enabling GFM (tables, strikethrough, task lists,

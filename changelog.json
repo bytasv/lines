@@ -1,6 +1,16 @@
 {
   "web": [
     {
+      "version": "0.1.39",
+      "date": "2026-11-16",
+      "items": [
+        {
+          "text": "While reviewing a plan, highlight a passage and click Ask (or press Ask in focus mode) to chat with Claude about it on the side; the plan stays pending, the answers stream in, and any answer can be added as a plan comment.",
+          "image": "web-0.1.39-plan-ask.png"
+        }
+      ]
+    },
+    {
       "version": "0.1.38",
       "date": "2026-11-15",
       "items": [
@@ -399,6 +409,10 @@
     }
   ],
   "desktopPending": [
-    "Editing a workflow no longer shifts the steps of sessions already running it: a session keeps the steps it started with, and your changes apply to new sessions."
+    "Editing a workflow no longer shifts the steps of sessions already running it: a session keeps the steps it started with, and your changes apply to new sessions.",
+    {
+      "text": "Questions about a pending plan are answered by a read-only copy of the conversation, so asking never changes the plan or any files.",
+      "image": "desktop-next-plan-ask-readonly.png"
+    }
   ]
 }

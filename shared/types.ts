@@ -1518,6 +1518,10 @@ export interface TranscriptEvent {
    * - 'context-compact': context compaction requested / finished
    * - 'provider-switch': the conversation was dropped to move the session to the
    *                 other provider, and the new one seeded with a summary
+   * - 'plan-chat' : a side question about a pending plan card, or its answer
+   *                 (see PlanChatEventData). Its own kind and never 'user', for
+   *                 the reason 'interject' is: a 'user' event opens a turn, and a
+   *                 side question runs on a fork, outside every turn.
    */
   kind:
     | 'user'
@@ -1528,8 +1532,39 @@ export interface TranscriptEvent {
     | 'workflow'
     | 'turn-summary'
     | 'context-compact'
-    | 'provider-switch';
+    | 'provider-switch'
+    | 'plan-chat';
   data: unknown;
+}
+
+/**
+ * One entry of a plan side-chat: a question asked about a pending ExitPlanMode
+ * card, or the forked agent's answer (or failure) to it. Rendered on the
+ * permission item it names, never as a row of its own.
+ */
+export interface PlanChatEventData {
+  /** The ExitPlanMode permission request the chat belongs to. */
+  requestId: string;
+  /** Pairs a question with its answer. Client-generated. */
+  askId: string;
+  /**
+   * 'partial' is live-only: the answer so far while it streams, broadcast but
+   * never persisted, and superseded by the next partial or the final answer.
+   */
+  role: 'question' | 'answer' | 'error' | 'partial';
+  /** For a 'partial', the whole text so far — never a delta, so any one can be dropped. */
+  text: string;
+  /** Partial only: the tool the fork is using right now, e.g. "Read". */
+  activity?: string;
+  /** Question only: the plan passage the user highlighted. */
+  quote?: string;
+  /** Question only: who asked. */
+  actor?: Actor;
+  /** Answer only: the forked CLI session that answered, reused by later asks. */
+  forkSessionId?: string;
+  /** Answer only: what the side turn cost. Not folded into session spend. */
+  costUsd?: number;
+  at: number;
 }
 
 /**
@@ -1738,6 +1773,23 @@ export function normalizePlanComments(raw: unknown): PlanComment[] {
     if (out.length === PLAN_COMMENTS_MAX) break;
   }
   return out;
+}
+
+const PLAN_CHAT_TEXT_MAX = 10_000;
+
+/**
+ * Canonical form of a plan side-chat question off the wire: trimmed, capped,
+ * and null when there is nothing to ask. A quote that is not a string is
+ * dropped, not rejected — the question still stands without it.
+ */
+export function normalizePlanChatAsk(raw: {
+  text?: unknown;
+  quote?: unknown;
+}): { text: string; quote?: string } | null {
+  const text = typeof raw.text === 'string' ? raw.text.trim().slice(0, PLAN_CHAT_TEXT_MAX) : '';
+  if (!text) return null;
+  const quote = typeof raw.quote === 'string' ? raw.quote.trim().slice(0, PLAN_CHAT_TEXT_MAX) : '';
+  return quote ? { text, quote } : { text };
 }
 
 /**
@@ -2450,6 +2502,11 @@ export const MESSAGE_AUTHZ: Record<ClientMessage['type'], MessageAuthz> = {
   // (which editQueued uses): rewinding discards turns somebody else may have run.
   rewindSession: { needs: 'session', cap: 'interrupt' },
   permissionResponse: { needs: 'session', cap: 'approvePermissions' },
+  // `prompt`: asking the agent a question is the authority to write to it. The
+  // handler adds the plan-comment gate this table cannot express —
+  // `approvePermissions` too, and not `promptNeedsApproval`.
+  planChatAsk: { needs: 'session', cap: 'prompt' },
+  planChatCancel: { needs: 'session', cap: 'prompt' },
   setModel: { needs: 'session', cap: 'setModel' },
   // `interrupt`, not `setModel`, for the reason compactContext and rewindSession
   // sit there: this is destructive to the session's context. It is strictly more
@@ -2779,6 +2836,21 @@ export type ClientMessage =
        */
       planComments?: PlanComment[];
     }
+  /**
+   * Ask a side question about a pending plan card. Answered by a forked,
+   * read-only copy of the conversation; the live turn stays blocked on the card.
+   * Re-validated server-side with `normalizePlanChatAsk`.
+   */
+  | {
+      type: 'planChatAsk';
+      sessionId: string;
+      requestId: string;
+      askId: string;
+      text: string;
+      quote?: string;
+    }
+  /** Abort the in-flight side question on a plan card, if any. */
+  | { type: 'planChatCancel'; sessionId: string; requestId: string }
   | { type: 'workflowApprove'; sessionId: string; stepIndex: number }
   /** Mark the current step done from the stepper, whether it is parked or still running. */
   | { type: 'workflowForceAdvance'; sessionId: string; stepIndex: number }

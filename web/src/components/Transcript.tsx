@@ -866,7 +866,14 @@ const Item = memo(function Item({
     }
     case 'permission':
       // Auto-allowed calls are filtered out upstream; only real prompts reach here.
-      return <PermissionPrompt sessionId={sessionId} data={item.data} resolution={item.resolution} />;
+      return (
+        <PermissionPrompt
+          sessionId={sessionId}
+          data={item.data}
+          resolution={item.resolution}
+          planChat={item.planChat}
+        />
+      );
     case 'workflow':
       return <WorkflowMarker data={item.data} />;
     case 'context-compact':

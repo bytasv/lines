@@ -4,6 +4,7 @@ import type {
   ContextCompactData,
   FileSnapshotData,
   PermissionRequestData,
+  PlanChatEventData,
   PromptMention,
   ProviderSwitchData,
   TranscriptEvent,
@@ -125,7 +126,14 @@ export type TranscriptItem =
    *  `changed` marks a later one — a mid-session model switch, not a session start. */
   | { kind: 'system-init'; key: string; model: string; changed?: boolean }
   | ResultItem
-  | { kind: 'permission'; key: string; data: PermissionRequestData; resolution?: 'allow' | 'deny' | 'expired' }
+  | {
+      kind: 'permission';
+      key: string;
+      data: PermissionRequestData;
+      resolution?: 'allow' | 'deny' | 'expired';
+      /** ExitPlanMode only: the side chat asked about this plan, oldest first. */
+      planChat?: PlanChatEventData[];
+    }
   | { kind: 'workflow'; key: string; data: WorkflowMarkerData }
   | ContextCompactItem
   | ProviderSwitchItem
@@ -356,7 +364,9 @@ export function buildTranscript(
     // Mirrors the server's withoutCompactSpans, including its bound — the next
     // 'user' event closes an orphan span, so a crash mid-compaction can't swallow
     // the rest of the transcript.
-    if (openCompact && event.kind !== 'context-compact') {
+    // 'plan-chat' is exempt: it belongs to a plan card, not to the compaction,
+    // and must neither be swallowed nor close the span.
+    if (openCompact && event.kind !== 'context-compact' && event.kind !== 'plan-chat') {
       // A failed `result` is the turn dying mid-compaction — the server has already
       // abandoned the span (the result is emitted before the abandon event that
       // would close it), so let it through rather than swallowing the only failure
@@ -455,6 +465,20 @@ export function buildTranscript(
           permissionItems.set(data.requestId, item as never);
           items.push(item);
         }
+        break;
+      }
+      case 'plan-chat': {
+        // No row of its own: it rides the plan card it is about, the way a
+        // resolution does.
+        const data = event.data as PlanChatEventData;
+        const card = permissionItems.get(data.requestId);
+        if (!card) break;
+        // A partial is superseded by the next one and by the final answer, so
+        // at most one per question survives, and none once it is answered.
+        const kept = (card.planChat ?? []).filter(
+          (entry) => !(entry.role === 'partial' && entry.askId === data.askId),
+        );
+        card.planChat = [...kept, data];
         break;
       }
       case 'turn-summary': {
@@ -851,6 +875,13 @@ function samePermissionData(a: PermissionRequestData, b: PermissionRequestData):
   return true;
 }
 
+/** Plan side-chat entries come straight off event data, so identity per entry is enough. */
+function samePlanChat(a?: PlanChatEventData[], b?: PlanChatEventData[]): boolean {
+  if (a === b) return true;
+  if (!a || !b || a.length !== b.length) return false;
+  return a.every((entry, i) => entry === b[i]);
+}
+
 /** The previous object when content-equal, else the fresh one (nested reuse applied). */
 function reuseItem(old: TranscriptItem, next: TranscriptItem): TranscriptItem {
   if (old === next) return old;
@@ -908,7 +939,11 @@ function reuseItem(old: TranscriptItem, next: TranscriptItem): TranscriptItem {
     }
     case 'permission': {
       const o = old as typeof next;
-      return o.resolution === next.resolution && samePermissionData(o.data, next.data) ? o : next;
+      return o.resolution === next.resolution &&
+        samePermissionData(o.data, next.data) &&
+        samePlanChat(o.planChat, next.planChat)
+        ? o
+        : next;
     }
     case 'workflow':
       return (old as typeof next).data === next.data ? old : next;

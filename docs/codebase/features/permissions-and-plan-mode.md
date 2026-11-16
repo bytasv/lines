@@ -2,7 +2,7 @@
 
 Covers: `permission-mode-selector`, `permission-resolution-provenance`, `guard-allowlist`,
 `plan-file-auto-approve`, `plan-mode-reads`, `plan-mode-write-rejection`, `plan-review-card`,
-`plan-reply-keeps-planning`, `plan-comments`.
+`plan-reply-keeps-planning`, `plan-comments`, `plan-side-chat`.
 
 ## Purpose
 
@@ -67,6 +67,11 @@ deliverable is written and reviewed.
   are delivered into the turn the approval starts, since the SDK's allow arm carries no message)
   and **Refine with comments** (a deny built server-side from the comments, ignoring whatever the
   client sent as `denyMessage`). With zero comments the card is unchanged from before this existed.
+
+- **Plan side-chat** — ask a question about a pending plan card, or about one highlighted passage,
+  and get an answer from a forked, read-only copy of the session's conversation. The live turn stays
+  blocked on the card, and nothing in the question writes to the conversation. An answer can be
+  turned into a normal plan comment.
 
 ## Entry points
 
@@ -775,6 +780,34 @@ clicking a list row scrolls its passage into view (nearest edge, so an already-v
 doesn't jolt), and only in the copy the user is looking at — the fullscreen copy when focus mode
 is open, otherwise the inline one.
 
+### Plan side-chat
+
+A question about a pending ExitPlanMode card is answered by a side query on the bridge, not by the
+live turn. The web client sends `planChatAsk` (text, optional highlighted quote). `index.ts` checks
+the actor holds `approvePermissions` and not `promptNeedsApproval`, then `SessionManager.askPlanChat`
+checks the card is still pending and that no other question on it is in flight.
+
+The first question forks the CLI conversation with `forkSession`, anchored on the last main-thread
+assistant message before the ExitPlanMode `tool_use` (`planChatAnchor`). The anchor is inclusive, so
+the dangling tool call stays out of the fork. The first prompt carries the plan text, because the
+fork ends before the card's call. Later questions resume the same fork. After a bridge restart the
+fork id is recovered from the newest answer in the transcript, so no second fork is made.
+
+The side query (`runPlanChatTurn`) runs with plan-mode read rules only. A call is allowed only when
+`planChatToolDecision` accepts it, and the same decision runs both in a PreToolUse hook (which
+precedes settings allow rules) and in `canUseTool`. The write tools are also in `disallowedTools`.
+No MCP servers are attached, the turn cap is 15, and a question is abandoned after five minutes.
+
+Progress is streamed as `'plan-chat'` events with role `partial`: the whole text so far, plus the
+tool or thinking phase, at most every 100 ms. Partials are broadcast only and never written to the
+transcript. The final `answer` (or `error`) is the one saved record, so reloads and other viewers
+see the same history. The transcript builder attaches all of these to the permission item for the
+card; the chat pane is `PlanChat`.
+
+Resolving the card by any path aborts an in-flight question (the hook sits in `emitEvent`) and
+drops the card's fork entry. A question still open after a restart is closed with an error the
+next time the card is touched.
+
 ## Dependencies
 
 - Mantine `@mantine/core` `SegmentedControl` (ReactNode label) and `Select` (`renderOption`,
@@ -1132,6 +1165,18 @@ is open, otherwise the inline one.
 - Harness tools that only observe or delegate are not dangerous in auto mode; `Monitor` is checked
   exactly like `Bash`.
 
+- A side question never writes a `'user'` event, calls `prompt()`, reaches the worker, changes the
+  session status, touches the permission wait clock, or moves the resume pointer. `collectTurns`,
+  `planReplyDecision` and `lastHumanGesture` therefore never see it, so Retry cannot re-send it.
+- The side chat's tools are read-only by two independent gates. A call it may not make is denied
+  with a fixed message and never raises a card.
+- One question per plan card is in flight at a time. A second is refused, not queued.
+- Asking requires `prompt` and `approvePermissions`, and the actor must not carry
+  `promptNeedsApproval`. Once a card is resolved the history stays readable, but nothing can be asked.
+- The side chat is Claude-only. The provider's `planSideChat` capability is false for codex.
+- A side question's cost is shown on its answer only and is not added to session spend.
+- Partial answer text is live-only and never persisted.
+
 ## Architectural rules
 
 - Single shared `PERMISSION_MODES` list — no component defines its own label/description array.
@@ -1259,6 +1304,12 @@ is open, otherwise the inline one.
   (`<mark>`-wrapping matched text) specifically because the plan markdown re-renders on mount and
   on every live re-read of the plan file — a `Highlight`'s `Range`s live outside the DOM and need
   no cleanup or reconciliation across either re-render.
+
+- The side query runs on the bridge through the SDK's `query()`, like `helperQuery.ts`, and never
+  through the worker. The worker keeps one query per session id and routes every event through
+  `handleWorkerEvent`; a side chat on that path would touch turns and cost lineage.
+- `forkSession` now has two callers: rewind and the plan side-chat. Both reach it through an injected
+  field so tests can stand in for it.
 
 ## Related decisions
 

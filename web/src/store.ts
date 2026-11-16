@@ -14,6 +14,7 @@ import type {
   MemoryReview,
   ModelOption,
   PermissionMode,
+  PlanChatEventData,
   PlanComment,
   Project,
   ProjectKeyMap,
@@ -148,6 +149,7 @@ const VOICE_LANGUAGE_KEY = 'lines.voiceLanguage';
 const VOICE_TRANSLATE_KEY = 'lines.voiceTranslate';
 const DRAFTS_KEY = 'lines.drafts';
 const PLAN_COMMENTS_KEY = 'lines.planComments';
+const PLAN_CHAT_DRAFTS_KEY = 'lines.planChatDrafts';
 
 export type SidebarMode = 'sessions' | 'files';
 
@@ -419,6 +421,84 @@ function pruneDrafts(doomedSessionIds: Set<string>) {
     }
   }
   if (changed) localStorage.setItem(DRAFTS_KEY, JSON.stringify(drafts));
+}
+
+/**
+ * A streaming side-chat answer arrives as live-only 'partial' events, each with
+ * the whole text so far. Keep only the newest per question, and none once the
+ * question has its answer or error — otherwise every partial of every answer
+ * would stay in memory until the next reload.
+ */
+function withoutStalePlanChatPartials(events: TranscriptEvent[]): TranscriptEvent[] {
+  const newestPartial = new Map<string, number>();
+  const settled = new Set<string>();
+  events.forEach((e, i) => {
+    if (e.kind !== 'plan-chat') return;
+    const d = e.data as PlanChatEventData;
+    if (d.role === 'partial') newestPartial.set(d.askId, i);
+    else if (d.role === 'answer' || d.role === 'error') settled.add(d.askId);
+  });
+  if (newestPartial.size === 0) return events;
+  return events.filter((e, i) => {
+    if (e.kind !== 'plan-chat') return true;
+    const d = e.data as PlanChatEventData;
+    if (d.role !== 'partial') return true;
+    return !settled.has(d.askId) && newestPartial.get(d.askId) === i;
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Plan side-chat drafts — the unsent question in a plan card's side chat, kept
+// for the reason plan comments are: the card remounts freely. Same keying.
+// ---------------------------------------------------------------------------
+
+type PlanChatDraftStore = Record<string, Record<string, string>>;
+
+function loadPlanChatDrafts(): PlanChatDraftStore {
+  try {
+    const raw = localStorage.getItem(PLAN_CHAT_DRAFTS_KEY);
+    const parsed = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
+    const out: PlanChatDraftStore = {};
+    for (const [sessionId, byRequest] of Object.entries(parsed)) {
+      if (!byRequest || typeof byRequest !== 'object') continue;
+      for (const [requestId, text] of Object.entries(byRequest as Record<string, unknown>)) {
+        if (typeof text === 'string' && text) (out[sessionId] ??= {})[requestId] = text;
+      }
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+/** The unsent side-chat question for one plan card, or ''. */
+export function readPlanChatDraft(sessionId: string, requestId: string): string {
+  return loadPlanChatDrafts()[sessionId]?.[requestId] ?? '';
+}
+
+/** Persist a card's unsent question; an empty one removes the entry. */
+export function writePlanChatDraft(sessionId: string, requestId: string, text: string) {
+  const all = loadPlanChatDrafts();
+  if (text) (all[sessionId] ??= {})[requestId] = text;
+  else {
+    delete all[sessionId]?.[requestId];
+    if (all[sessionId] && Object.keys(all[sessionId]).length === 0) delete all[sessionId];
+  }
+  localStorage.setItem(PLAN_CHAT_DRAFTS_KEY, JSON.stringify(all));
+}
+
+/** Delete exactly the named sessions' side-chat drafts. Same rule as pruneDrafts. */
+function prunePlanChatDrafts(doomedSessionIds: Set<string>) {
+  if (doomedSessionIds.size === 0) return;
+  const all = loadPlanChatDrafts();
+  let changed = false;
+  for (const id of doomedSessionIds) {
+    if (all[id]) {
+      delete all[id];
+      changed = true;
+    }
+  }
+  if (changed) localStorage.setItem(PLAN_CHAT_DRAFTS_KEY, JSON.stringify(all));
 }
 
 // ---------------------------------------------------------------------------
@@ -1530,7 +1610,10 @@ export const useStore = create<UiState>((set, get) => {
         const base = lastComplete >= 0 ? existing.filter((e) => !isSdkStream(e)) : existing;
         const tail =
           lastComplete >= 0 ? fresh.filter((e, i) => i >= lastComplete || !isSdkStream(e)) : fresh;
-        transcripts[sessionId] = [...base, ...tail];
+        const merged = [...base, ...tail];
+        transcripts[sessionId] = fresh.some((e) => e.kind === 'plan-chat')
+          ? withoutStalePlanChatPartials(merged)
+          : merged;
         lastEventAt[sessionId] = now;
         changed = true;
       }
@@ -2594,6 +2677,7 @@ export const useStore = create<UiState>((set, get) => {
         });
         pruneDrafts(new Set(doomed));
         prunePlanComments(new Set(doomed));
+        prunePlanChatDrafts(new Set(doomed));
         void pruneDraftAttachments(new Set(doomed));
         // Owner connections only: a guest's hello carries no account-wide field,
         // and adopting somebody else's machine id here would stamp this user's

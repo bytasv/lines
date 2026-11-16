@@ -32,6 +32,7 @@ import {
   authorizeMessage,
   isSessionActive,
   normalizePlanComments,
+  normalizePlanChatAsk,
   normalizeRootPath,
   capsForPreset,
   projectRoots,
@@ -1840,6 +1841,32 @@ async function handleMessageImpl(ctx: UserContext, ws: BrowserLink, msg: ClientM
       );
       break;
     }
+    case 'planChatAsk': {
+      // MESSAGE_AUTHZ has checked `prompt`. Asking about a plan also needs what
+      // plan comments need (see permissionResponse above): `approvePermissions`,
+      // and prompts that do not wait for the owner's approval.
+      const mayAsk =
+        authorizeMessage(
+          { type: 'permissionResponse', sessionId: msg.sessionId, requestId: msg.requestId, allow: false },
+          access,
+        ).ok && !access.caps.promptNeedsApproval;
+      const ask = normalizePlanChatAsk(msg);
+      const askId = typeof msg.askId === 'string' ? msg.askId.slice(0, 64) : '';
+      const result = !mayAsk
+        ? { ok: false as const, reason: 'You cannot ask about this plan.' }
+        : !ask || !askId
+          ? { ok: false as const, reason: 'Type a question first.' }
+          : sessions.askPlanChat(msg.sessionId, msg.requestId, { askId, ...ask }, actor);
+      if (!result.ok) {
+        ws.send(
+          JSON.stringify({ type: 'error', sessionId: msg.sessionId, message: result.reason } satisfies ServerMessage),
+        );
+      }
+      break;
+    }
+    case 'planChatCancel':
+      sessions.cancelPlanChat(msg.sessionId, msg.requestId);
+      break;
     case 'workflowApprove':
       workflows.approve(msg.sessionId, msg.stepIndex);
       break;

@@ -25,6 +25,7 @@ import type {
   PendingSteer,
   PermissionMode,
   PermissionRequestData,
+  PlanChatEventData,
   PermissionResolutionSource,
   PlanComment,
   PromptAttachment,
@@ -109,6 +110,7 @@ import { claudeCliRefusalMessage, claudeCliStatus } from './claudeCli.ts';
 import { codexCliRefusalMessage, codexCliStatus } from './codexCli.ts';
 import { OPENAI_CONNECT_MESSAGE, type OpenaiAuthManager } from './openaiAuth.ts';
 import { runHelperQuery } from './helperQuery.ts';
+import { planChatAnchor, runPlanChatTurn, type PlanChatRunner } from './planSideChat.ts';
 import { classifyTurnFailure, turnFailureAdvice, turnFailureRetryHint } from './turnFailure.ts';
 import {
   ADD_MCP_CONNECTION_TOOL,
@@ -930,6 +932,27 @@ function pendingExitPlanRequestId(input: {
   return exitPlanRequestId(input.events, input.livePendingIds);
 }
 
+/** How often a streaming side-chat answer is broadcast. */
+const PLAN_CHAT_PARTIAL_MS = 100;
+
+/** Key of a plan card's side-chat state in SessionManager's maps. */
+function planChatKey(sessionId: string, requestId: string): string {
+  return `${sessionId}\0${requestId}`;
+}
+
+/**
+ * The fork the newest answer on this plan card came from, so a side chat
+ * survives a bridge restart without forking again.
+ */
+function newestPlanChatFork(events: TranscriptEvent[], requestId: string): string | undefined {
+  for (let i = events.length - 1; i >= 0; i--) {
+    if (events[i].kind !== 'plan-chat') continue;
+    const d = events[i].data as PlanChatEventData;
+    if (d.requestId === requestId && d.role === 'answer' && d.forkSessionId) return d.forkSessionId;
+  }
+  return undefined;
+}
+
 /**
  * The ExitPlanMode request to answer: a live pending one when the query is
  * still up, else the newest unresolved one in the transcript (orphan case —
@@ -1476,6 +1499,15 @@ export class SessionManager {
   /** The SDK's session fork, used by rewindSession. A field so a test can stand in
    *  for it without a real CLI session on disk. */
   forkSession: typeof forkSession = forkSession;
+  /** The plan side-chat's side query (see planSideChat.ts). A field for the same
+   *  reason forkSession is: so a test can stand in for the SDK. */
+  planChatRunner: PlanChatRunner = runPlanChatTurn;
+  /** How long one side question may run before it is abandoned. */
+  planChatTimeoutMs = 5 * 60_000;
+  /** The side question in flight per plan card, keyed `sessionId\0requestId`. */
+  private planChatInflight = new Map<string, AbortController>();
+  /** The forked CLI session each plan card's side chat resumes, same key. */
+  private planChatForks = new Map<string, string>();
   /**
    * Fired once the auto-titler has settled, with the title it produced — or `''`
    * when it produced none (no token, a failed query). A work-tree session's branch
@@ -1841,6 +1873,12 @@ export class SessionManager {
     const event: TranscriptEvent = { seq: state.seq++, ts: Date.now(), kind, data };
     if (persistToDisk) this.store.appendTranscript(sessionId, event);
     this.broadcast({ type: 'event', sessionId, event });
+    // Every resolution site comes through here, so this is the one place a plan
+    // card being answered ends its side chat.
+    if (kind === 'permission') {
+      const d = data as Partial<PermissionRequestData> | null;
+      if (d?.resolution && d.requestId) this.endPlanChat(sessionId, d.requestId);
+    }
     return event.seq;
   }
 
@@ -4640,6 +4678,201 @@ export class SessionManager {
       if (data.requestId === requestId && data.resolution) return data;
     }
     return null;
+  }
+
+  /**
+   * Ask a side question about the pending plan card `requestId`.
+   *
+   * Answered by a forked, read-only copy of the conversation (planSideChat.ts),
+   * never by the live query: the turn stays blocked on the card, and nothing here
+   * writes a 'user' event, pushes to the worker, touches the session status, the
+   * permission wait clock or the resume pointer. The question and its answer are
+   * 'plan-chat' events, which the transcript attaches to the card.
+   *
+   * Validation answers synchronously; the side query runs in the background.
+   * Who may ask is decided by the caller (index.ts) — the same gate plan comments
+   * use.
+   */
+  askPlanChat(
+    sessionId: string,
+    requestId: string,
+    ask: { askId: string; text: string; quote?: string },
+    actor?: Actor,
+  ): { ok: true } | { ok: false; reason: string } {
+    const meta = this.sessions.get(sessionId);
+    if (!meta) return { ok: false, reason: 'That session is gone.' };
+    if (!capabilitiesFor(providerForModel(meta.model)).planSideChat) {
+      return { ok: false, reason: 'Questions about a plan are not available for this model yet.' };
+    }
+    const original = this.findPermissionRequest(sessionId, requestId);
+    if (!original || original.toolName !== 'ExitPlanMode') {
+      return { ok: false, reason: 'That plan can no longer be asked about.' };
+    }
+    if (this.findPermissionResolution(sessionId, requestId)) {
+      return { ok: false, reason: 'That plan has already been answered.' };
+    }
+    const key = planChatKey(sessionId, requestId);
+    if (this.planChatInflight.has(key)) {
+      return { ok: false, reason: 'Wait for the answer to the previous question first.' };
+    }
+    const events = this.store.loadTranscript(sessionId);
+    let forkId = this.planChatForks.get(key) ?? newestPlanChatFork(events, requestId);
+    const anchor = forkId ? null : planChatAnchor(events, requestId);
+    if (!forkId && (!anchor || !meta.claudeSessionId)) {
+      return { ok: false, reason: 'There is no conversation to ask about yet.' };
+    }
+    // A question left unanswered by a bridge restart would show as pending
+    // forever; close it before asking the next one.
+    this.closeOrphanPlanChat(sessionId, requestId, events);
+
+    const controller = new AbortController();
+    this.planChatInflight.set(key, controller);
+    this.emitEvent(sessionId, 'plan-chat', {
+      requestId,
+      askId: ask.askId,
+      role: 'question',
+      text: ask.text,
+      ...(ask.quote ? { quote: ask.quote } : {}),
+      ...(actor ? { actor } : {}),
+      at: Date.now(),
+    } satisfies PlanChatEventData);
+
+    // The first question carries the plan itself: the fork ends before the
+    // ExitPlanMode call, so the plan text may exist nowhere else it can see.
+    const plan = typeof original.input?.plan === 'string' ? original.input.plan.trim() : '';
+    const parts: string[] = [];
+    if (!forkId && plan) parts.push(`The plan under review:\n\n${plan}`);
+    if (ask.quote) parts.push(`Regarding this part of the plan: "${ask.quote}"`);
+    parts.push(ask.text);
+    const prompt = parts.join('\n\n');
+
+    const timer = setTimeout(() => controller.abort(), this.planChatTimeoutMs);
+    const startedAt = Date.now();
+    // Streamed text, broadcast at most every PLAN_CHAT_PARTIAL_MS and never
+    // persisted (the final answer is the record). `settled` stops a throttled
+    // partial landing after the answer and reviving the pending view.
+    let settled = false;
+    let latest: { text: string; activity?: string } | null = null;
+    let partialTimer: ReturnType<typeof setTimeout> | null = null;
+    const flushPartial = () => {
+      partialTimer = null;
+      if (settled || !latest || !this.sessions.has(sessionId)) return;
+      this.emitEvent(
+        sessionId,
+        'plan-chat',
+        { requestId, askId: ask.askId, role: 'partial', ...latest, at: Date.now() } satisfies PlanChatEventData,
+        false,
+      );
+    };
+    const onPartial = (partial: { text: string; activity?: string }) => {
+      latest = partial;
+      partialTimer ??= setTimeout(flushPartial, PLAN_CHAT_PARTIAL_MS);
+    };
+    void devRuntime
+      .run(async () => {
+        if (!forkId) {
+          const fork = await this.forkSession(meta.claudeSessionId!, {
+            upToMessageId: anchor!,
+            dir: meta.cwd,
+          });
+          forkId = fork.sessionId;
+          this.planChatForks.set(key, forkId);
+        }
+        if (controller.signal.aborted) throw new Error('Cancelled.');
+        return this.planChatRunner({
+          forkSessionId: forkId,
+          prompt,
+          cwd: meta.cwd,
+          roots: this.rootsFor(meta),
+          model: resolveModelId(meta.model),
+          token: await this.ownerToken(),
+          allowlist: () => this.guard.list(),
+          signal: controller.signal,
+          onPartial,
+        });
+      })
+      .then(
+        (answer) => {
+          settled = true;
+          if (controller.signal.aborted) throw new Error('Cancelled.');
+          this.planChatForks.set(key, answer.sessionId);
+          this.emitEvent(sessionId, 'plan-chat', {
+            requestId,
+            askId: ask.askId,
+            role: 'answer',
+            text: answer.text,
+            forkSessionId: answer.sessionId,
+            ...(answer.costUsd !== undefined ? { costUsd: answer.costUsd } : {}),
+            at: Date.now(),
+          } satisfies PlanChatEventData);
+          console.log(
+            `[plan-chat] [session ${sessionId}] answered in ${Date.now() - startedAt}ms` +
+              (answer.costUsd !== undefined ? ` ($${answer.costUsd.toFixed(4)})` : ''),
+          );
+        },
+      )
+      .catch((err: unknown) => {
+        const message = controller.signal.aborted
+          ? 'Cancelled.'
+          : err instanceof Error
+            ? err.message
+            : String(err);
+        console.log(`[plan-chat] [session ${sessionId}] failed: ${message}`);
+        if (!this.sessions.has(sessionId)) return;
+        this.emitEvent(sessionId, 'plan-chat', {
+          requestId,
+          askId: ask.askId,
+          role: 'error',
+          text: message,
+          at: Date.now(),
+        } satisfies PlanChatEventData);
+      })
+      .finally(() => {
+        settled = true;
+        if (partialTimer) clearTimeout(partialTimer);
+        clearTimeout(timer);
+        if (this.planChatInflight.get(key) === controller) this.planChatInflight.delete(key);
+      });
+    return { ok: true };
+  }
+
+  /**
+   * Stop the side question in flight on a plan card. With none in flight, closes
+   * a question a bridge restart left unanswered, so its pending indicator ends.
+   */
+  cancelPlanChat(sessionId: string, requestId: string) {
+    const controller = this.planChatInflight.get(planChatKey(sessionId, requestId));
+    if (controller) {
+      controller.abort();
+      return;
+    }
+    this.closeOrphanPlanChat(sessionId, requestId, this.store.loadTranscript(sessionId));
+  }
+
+  /** The plan card was answered: abort its side question and forget its fork. */
+  private endPlanChat(sessionId: string, requestId: string) {
+    const key = planChatKey(sessionId, requestId);
+    this.planChatInflight.get(key)?.abort();
+    this.planChatForks.delete(key);
+  }
+
+  /** Emit an error for the newest question on this card when it has no reply. */
+  private closeOrphanPlanChat(sessionId: string, requestId: string, events: TranscriptEvent[]) {
+    if (this.planChatInflight.has(planChatKey(sessionId, requestId))) return;
+    for (let i = events.length - 1; i >= 0; i--) {
+      if (events[i].kind !== 'plan-chat') continue;
+      const d = events[i].data as PlanChatEventData;
+      if (d.requestId !== requestId) continue;
+      if (d.role !== 'question') return;
+      this.emitEvent(sessionId, 'plan-chat', {
+        requestId,
+        askId: d.askId,
+        role: 'error',
+        text: 'Interrupted before it was answered. Ask again.',
+        at: Date.now(),
+      } satisfies PlanChatEventData);
+      return;
+    }
   }
 
   /**
