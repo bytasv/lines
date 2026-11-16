@@ -2052,7 +2052,8 @@ export class WorkflowEngine {
       stepName: this.stepName(wf.steps[i]),
       event: 'retried',
     });
-    this.sessions.prompt(sessionId, text, source, attachments, [], actor);
+    if (source === 'goal') this.sessions.prompt(sessionId, text, 'goal', attachments, [], actor);
+    else this.sessions.prompt(sessionId, text, 'workflow', attachments, [], actor);
   }
 
   approve(sessionId: string, stepIndex: number) {
