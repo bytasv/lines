@@ -22,6 +22,7 @@ import {
   IconHandStop,
   IconPlayerPlay,
   IconPlayerTrackNext,
+  IconTarget,
 } from '@tabler/icons-react';
 import type {
   ModelOption,
@@ -49,6 +50,8 @@ import { send } from '../ws';
 import { revealWorkflowStep } from '../lib/workflowReveal';
 import { ConfirmModal } from './ConfirmModal';
 import { WorkflowRunModal } from './workflow/WorkflowRunModal';
+import { GoalModal } from './GoalModal';
+import { goalStatusLabel } from './GoalChip';
 import { crossesProvider, effortLabel, gateLabel, modelLabel, startLabel } from './workflow/StepSettings';
 
 /**
@@ -234,6 +237,11 @@ export function WorkflowStepper({
 
   const currentStatus = state.stepStatuses[state.stepIndex];
   const waiting = currentStatus === 'waiting-approval';
+  /** Setting a goal on a parked step sends it back to work, so it is a prompt. */
+  const canPrompt = useCan('prompt');
+  const [goalOpen, setGoalOpen] = useState(false);
+  /** The parked step's goal, when it has one — it says why the step stopped. */
+  const stepGoal = state.stepGoal?.stepIndex === state.stepIndex ? state.stepGoal : undefined;
   /** A parked step with a live turn over it can only be a manual compaction — nothing
    *  else runs a turn on a parked step. The server refuses approve/force-advance for
    *  the duration (see WorkflowEngine.approve), so the button must not offer it. */
@@ -504,12 +512,12 @@ export function WorkflowStepper({
           );
         })}
         {tunable && (
-          <Tooltip label="Models for the steps still to come" withArrow fz="xs">
+          <Tooltip label="Models and goals for the steps still to come" withArrow fz="xs">
             <ActionIcon
               variant="subtle"
               color="gray"
               size="sm"
-              aria-label="Choose models for the remaining steps"
+              aria-label="Choose models and goals for the remaining steps"
               style={{ flexShrink: 0 }}
               onClick={() => setTuneOpen(true)}
             >
@@ -529,6 +537,7 @@ export function WorkflowStepper({
         }
         onClose={() => setTuneOpen(false)}
       />
+      <GoalModal session={session} opened={goalOpen} onClose={() => setGoalOpen(false)} />
       {(waiting || advancing || stopping || stalled || resumable) && (
         // One line, not a card. This strip is on screen for as long as a step is
         // parked — which is most of a workflow's life, and the whole of it when
@@ -562,8 +571,24 @@ export function WorkflowStepper({
                       ? 'Never started, and nothing is running'
                       : resumable
                         ? 'Done, but the next step never started'
-                        : 'Finished — approve, or reply to keep iterating'}
+                        : stepGoal && stepGoal.status !== 'active' && stepGoal.status !== 'evaluating'
+                          ? `Goal ${goalStatusLabel(stepGoal).label.toLowerCase()} — approve, or reply to keep iterating`
+                          : 'Finished — approve, or reply to keep iterating'}
           </Text>
+          {waiting && !compacting && canPrompt && (
+            <Tooltip label={stepGoal ? 'Edit or resume this step’s goal' : 'Set a goal — the step keeps working until it is met'} withArrow fz="xs">
+              <Button
+                size="compact-xs"
+                variant="default"
+                style={{ flexShrink: 0, marginLeft: 'auto' }}
+                leftSection={<IconTarget size={12} />}
+                disabled={!connected}
+                onClick={() => setGoalOpen(true)}
+              >
+                {stepGoal ? 'Goal' : 'Set goal'}
+              </Button>
+            </Tooltip>
+          )}
           {/* Busy state is server-owned (state.advancing) so every tab agrees and the
               loader can't hang on a dropped message. Disabled offline: ws.ts silently
               drops non-prompt messages when the socket is closed. */}

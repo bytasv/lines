@@ -83,6 +83,7 @@ import {
 } from './mcpWorkflowTools.ts';
 import { AGENT_AUTH_WAIT_MS, McpAuthPending, type McpAuthSettled } from './mcpAuth.ts';
 import * as workflowCommands from './workflowCommands.ts';
+import { hasUnfinishedWorkflow } from './goals.ts';
 import * as recipeCommands from './recipeCommands.ts';
 import * as worktreeCommands from './worktreeCommands.ts';
 import {
@@ -1472,7 +1473,7 @@ async function handleMessage(ctx: UserContext, ws: BrowserLink, msg: ClientMessa
 }
 
 async function handleMessageImpl(ctx: UserContext, ws: BrowserLink, msg: ClientMessage): Promise<void> {
-  const { sessions, workflows, recipes, store, auth, broadcast } = ctx;
+  const { sessions, workflows, goals, recipes, store, auth, broadcast } = ctx;
 
   /**
    * One gate, before the switch, for every message.
@@ -1879,6 +1880,26 @@ async function handleMessageImpl(ctx: UserContext, ws: BrowserLink, msg: ClientM
     case 'workflowRetry':
       workflows.retry(msg.sessionId, msg.stepIndex, msg.feedback);
       break;
+    case 'setGoal': {
+      // A workflow session's goal belongs to its current step.
+      const goalMeta = sessions.get(msg.sessionId);
+      const set =
+        goalMeta && hasUnfinishedWorkflow(goalMeta)
+          ? workflows.setStepGoal(msg.sessionId, msg.condition, msg.maxTurns, msg.onMet, actor)
+          : goals.setGoal(msg.sessionId, msg.condition, msg.maxTurns, actor);
+      if (!set.ok) {
+        ws.send(
+          JSON.stringify({ type: 'error', sessionId: msg.sessionId, message: set.reason } satisfies ServerMessage),
+        );
+      }
+      break;
+    }
+    case 'clearGoal': {
+      const goalMeta = sessions.get(msg.sessionId);
+      if (goalMeta && hasUnfinishedWorkflow(goalMeta)) workflows.clearStepGoal(msg.sessionId);
+      else goals.clearGoal(msg.sessionId);
+      break;
+    }
     case 'setWorkflowStepOverrides':
       workflows.setStepOverrides(msg.sessionId, msg.stepOverrides);
       break;
@@ -2705,6 +2726,7 @@ devRuntime.configure(() => ({
     ...[...registry.all()].flatMap((ctx) => [
       ...ctx.sessions.devReloadBlockers(),
       ...ctx.workflows.devReloadBlockers(),
+      ...ctx.goals.devReloadBlockers(),
     ]),
   ],
 }));

@@ -1,10 +1,12 @@
-import type { ReasoningEffort, WorkflowStepOverride } from '@lines/shared';
+import type { ReasoningEffort, StepGoalSpec, WorkflowStepOverride } from '@lines/shared';
 import { AUTO_EFFORT } from './modelSelect';
 
 /** One step row's picks in a per-run override picker: a model id, and an effort or AUTO_EFFORT. */
 export interface StepRowChoice {
   model: string;
   effort: string;
+  /** A goal planned for this step in this run; steps have none of their own. */
+  goal?: StepGoalSpec;
 }
 
 /** The step's own values, i.e. what a row resets to. Unresolved steps get blanks. */
@@ -25,6 +27,7 @@ export function seedStepRows(
     return {
       model: o.model ?? d.model,
       effort: o.reasoningEffort === undefined ? d.effort : (o.reasoningEffort ?? AUTO_EFFORT),
+      ...(o.goal ? { goal: o.goal } : {}),
     };
   });
 }
@@ -49,6 +52,7 @@ export function stepOverridesFromRows(
     if (r.effort !== base.effort) {
       o.reasoningEffort = r.effort === AUTO_EFFORT ? null : (r.effort as ReasoningEffort);
     }
+    if (r.goal?.condition.trim()) o.goal = { ...r.goal, condition: r.goal.condition.trim() };
     return Object.keys(o).length ? o : null;
   });
 }

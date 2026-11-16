@@ -5128,6 +5128,73 @@
         "session-and-project-ui",
         "end-to-end-encryption"
       ]
+    },
+    {
+      "id": "session-goals",
+      "name": "Session goals",
+      "doc": "features/session-goals.md",
+      "purpose": "Completion conditions that keep a session or a workflow step iterating after each settled turn until a small judge model says the condition is met, up to a turn cap; a step goal decides advance or park on met.",
+      "covers": [
+        "session-goal-auto-continue",
+        "workflow-step-goals"
+      ],
+      "entryPoints": [
+        "server/src/goals.ts",
+        "server/src/workflows.ts",
+        "web/src/components/GoalModal.tsx",
+        "web/src/components/GoalChip.tsx",
+        "web/src/components/Composer.tsx"
+      ],
+      "files": [
+        "server/src/goals.ts",
+        "server/src/workflows.ts",
+        "server/src/sessions.ts",
+        "server/src/userContext.ts",
+        "server/src/index.ts",
+        "shared/types.ts",
+        "shared/workflowValidation.ts",
+        "web/src/components/GoalModal.tsx",
+        "web/src/components/GoalChip.tsx",
+        "web/src/components/Composer.tsx",
+        "web/src/components/WorkflowStepper.tsx",
+        "web/src/components/workflow/WorkflowRunModal.tsx",
+        "web/src/lib/stepOverrides.ts",
+        "web/src/components/Transcript.tsx",
+        "web/src/lib/transcript.ts"
+      ],
+      "symbols": [
+        "GoalEngine",
+        "parseGoalVerdict",
+        "WorkflowEngine.setStepGoal",
+        "WorkflowEngine.judgeStepGoal",
+        "SessionManager.addTurnCompleteListener",
+        "GoalState",
+        "StepGoal",
+        "sanitizeStepGoal"
+      ],
+      "tests": [
+        "server/src/goals.test.ts",
+        "server/src/workflows.goal.test.ts"
+      ],
+      "businessRules": [
+        "Stop never auto-continues",
+        "Failed turn pauses without retry",
+        "Judge failure pauses",
+        "Turn cap pauses; set again resumes",
+        "Queued user prompt goes before the goal check",
+        "Restart pauses active goals",
+        "Synced rows cannot create or change goals",
+        "Workflow sessions use step goals only"
+      ],
+      "architecturalRules": [
+        "Judge through helper query",
+        "Workflow session settles belong to the workflow engine"
+      ],
+      "relatedDecisions": [],
+      "dependencies": [
+        "workflow-step-lifecycle",
+        "turn-interjection"
+      ]
     }
   ]
 }

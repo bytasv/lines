@@ -1010,10 +1010,18 @@ export type WorkflowStepStatus = 'pending' | 'running' | 'waiting-approval' | 'd
 export interface WorkflowStepOverride {
   model?: string;
   reasoningEffort?: ReasoningEffort | null;
+  /** A goal planned for this step: seeded as `WorkflowState.stepGoal` when the step starts. */
+  goal?: StepGoalSpec;
 }
 
 export interface WorkflowState {
   workflowId: string;
+  /**
+   * The current step's goal, if it has one: the step iterates (source `'goal'`)
+   * until a judge says the condition is met, then advances or parks per `onMet`.
+   * Only ever about step `stepIndex`; dropped whenever the step changes.
+   */
+  stepGoal?: StepGoal;
   stepIndex: number;
   stepStatuses: WorkflowStepStatus[];
   /** The user's task description, captured from the first prompt; substituted into step templates as {task}. */
@@ -1365,6 +1373,9 @@ export interface SessionMeta {
    */
   turnActor?: Actor;
   workflow?: WorkflowState;
+  /** The session goal driving auto-continued turns, if one is set (see GoalEngine).
+   *  Local-wins on sync: a remote row never creates or alters it. */
+  goal?: GoalState;
   lastCostUsd?: number;
   totalCostUsd?: number;
   /** `totalCostUsd` split by the model each turn ran on. Additive and never
@@ -1417,7 +1428,7 @@ export interface SessionMeta {
    * Who initiated the turn currently in flight — drives workflow advancement.
    * Persisted so a bridge restart mid-turn doesn't misattribute the result.
    */
-  turnSource?: 'user' | 'workflow';
+  turnSource?: TurnSource;
   /** ms epoch when the in-flight turn started; cleared when the turn settles. */
   turnStartedAt?: number;
   /** ms epoch of the last upsert — last-write-wins key for cross-instance sync. */
@@ -1518,6 +1529,7 @@ export interface TranscriptEvent {
    * - 'context-compact': context compaction requested / finished
    * - 'provider-switch': the conversation was dropped to move the session to the
    *                 other provider, and the new one seeded with a summary
+   * - 'goal'      : session goal transition marker (see GoalMarkerData)
    * - 'plan-chat' : a side question about a pending plan card, or its answer
    *                 (see PlanChatEventData). Its own kind and never 'user', for
    *                 the reason 'interject' is: a 'user' event opens a turn, and a
@@ -1533,6 +1545,7 @@ export interface TranscriptEvent {
     | 'turn-summary'
     | 'context-compact'
     | 'provider-switch'
+    | 'goal'
     | 'plan-chat';
   data: unknown;
 }
@@ -1859,6 +1872,75 @@ export interface AskUserQuestionInput {
     multiSelect?: boolean;
     options: { label: string; description?: string }[];
   }[];
+}
+
+/** Who initiated a turn: a person, a workflow step, or the session goal's auto-continue. */
+export type TurnSource = 'user' | 'workflow' | 'goal';
+
+/** Auto-continue turns a goal gets when the user does not pick a number. */
+export const GOAL_DEFAULT_MAX_TURNS = 10;
+/** Upper bound on a goal's auto-continue turns; requests are clamped to 1..this. */
+export const GOAL_MAX_TURNS_LIMIT = 50;
+
+/** A requested goal turn cap, clamped to 1..GOAL_MAX_TURNS_LIMIT; anything unusable is the default. */
+export function clampGoalMaxTurns(n: unknown): number {
+  if (typeof n !== 'number' || !Number.isFinite(n)) return GOAL_DEFAULT_MAX_TURNS;
+  return Math.min(GOAL_MAX_TURNS_LIMIT, Math.max(1, Math.round(n)));
+}
+
+/**
+ * A session goal: a completion condition the bridge checks after every settled
+ * turn, re-prompting the agent until a judge says it is met or the turn cap is hit.
+ *
+ * - `active`: waiting for the next turn to settle.
+ * - `evaluating`: the judge is reading the turn that just settled.
+ * - `met`: the judge said the condition holds; nothing more runs.
+ * - `paused`: stopped short without the user's say (see `pauseReason`); setting
+ *   the goal again resumes it with a fresh turn budget.
+ * - `stopped`: the user pressed Stop on a turn — Stop never auto-continues.
+ */
+export interface GoalState {
+  condition: string;
+  maxTurns: number;
+  /** Auto-continue prompts sent so far against `maxTurns`. */
+  turnsUsed: number;
+  status: 'active' | 'evaluating' | 'met' | 'paused' | 'stopped';
+  pauseReason?: 'cap' | 'turn-failed' | 'judge-failed' | 'restart';
+  lastVerdict?: { met: boolean; reason: string; at: number };
+  setAt: number;
+  /** Who set it. Absent for the owner. */
+  actor?: Actor;
+}
+
+/** What happens when a step's goal is met: move on, or park for approval. */
+export type GoalOnMet = 'advance' | 'wait';
+
+/** A goal planned for a workflow step (see WorkflowStepOverride.goal). */
+export interface StepGoalSpec {
+  condition: string;
+  maxTurns: number;
+  onMet: GoalOnMet;
+}
+
+/** A workflow step's live goal (see WorkflowState.stepGoal). */
+export interface StepGoal extends GoalState {
+  stepIndex: number;
+  onMet: GoalOnMet;
+}
+
+/** Transcript-event payload for a goal transition (kind: 'goal'). */
+export interface GoalMarkerData {
+  event: 'set' | 'unmet' | 'met' | 'paused' | 'stopped' | 'cleared';
+  reason?: string;
+  turnsUsed?: number;
+  maxTurns?: number;
+  /** Set on 'set' (the condition) and on 'paused' (why it paused). */
+  condition?: string;
+  pauseReason?: GoalState['pauseReason'];
+  /** Set when the goal is a workflow step's. */
+  stepIndex?: number;
+  /** Set on a step goal's 'set': what happens when it is met. */
+  onMet?: GoalOnMet;
 }
 
 export interface WorkflowMarkerData {
@@ -2545,6 +2627,11 @@ export const MESSAGE_AUTHZ: Record<ClientMessage['type'], MessageAuthz> = {
   workflowStartStep: { needs: 'session', cap: 'manageWorkflow' },
   workflowRetry: { needs: 'session', cap: 'manageWorkflow' },
 
+  // --- session goals. A goal sends prompts on its own, so setting or clearing
+  // one rides the same capability as prompting.
+  setGoal: { needs: 'session', cap: 'prompt' },
+  clearGoal: { needs: 'session', cap: 'prompt' },
+
   // --- files. Scope enforcement is in the handler, not here.
   fileRequest: { needs: 'cap', cap: 'readFiles' },
 
@@ -2857,6 +2944,11 @@ export type ClientMessage =
   /** Run the current step's first turn when an advance landed on it but never queued one. */
   | { type: 'workflowStartStep'; sessionId: string; stepIndex: number }
   | { type: 'workflowRetry'; sessionId: string; stepIndex: number; feedback: string }
+  /** Set (or replace, or resume) the session goal — or, on a session with an
+   *  unfinished workflow, the current step's goal. Resuming resets `turnsUsed`.
+   *  `onMet` only applies to a step goal. */
+  | { type: 'setGoal'; sessionId: string; condition: string; maxTurns?: number; onMet?: GoalOnMet }
+  | { type: 'clearGoal'; sessionId: string }
   | { type: 'saveWorkflow'; workflow: WorkflowDef; ownerName?: string }
   | { type: 'deleteWorkflow'; workflowId: string }
   /** Save or update a step. Content changes bump the version; `published` shares it instance-wide. Server stamps ownerId. */
@@ -4854,9 +4946,11 @@ export {
  */
 export {
   formatWorkflowIssues,
+  GOAL_CONDITION_MAX,
   MAX_WORKFLOW_NAME_LEN,
   OUTPUT_NAME_HINT,
   OUTPUT_NAME_RE,
+  sanitizeStepGoal,
   sanitizeStepOverrides,
   validateRoutingRule,
   validateStepContent,

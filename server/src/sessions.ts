@@ -46,6 +46,7 @@ import type {
   TokenUsageBreakdown,
   TranscriptEvent,
   UserUiSettings,
+  TurnSource,
 } from '@lines/shared';
 import {
   addCodexUsage,
@@ -1343,14 +1344,14 @@ export type StepRoutingProvider = (
 
 /** What pushTurn needs to route a turn that opens here (see prompt). */
 interface TurnRouteHint {
-  source: 'user' | 'workflow';
+  source: TurnSource;
   lastTurnFailed: boolean;
   retryWithFeedback: boolean;
 }
 
 export type TurnCompleteListener = (
   sessionId: string,
-  source: 'user' | 'workflow',
+  source: TurnSource,
   /** The turn settled under a Stop (see WorkflowEngine.onWorkflowTurnComplete). */
   interrupted: boolean,
   /** The turn ended in failure (is_error result, or a query that crashed) — the
@@ -1460,7 +1461,8 @@ export class SessionManager {
    * same clock the pending handshake does.
    */
   private authHolds = new Map<string, number>();
-  private onTurnComplete: TurnCompleteListener | null = null;
+  /** Every settle fans out to each of these (WorkflowEngine, GoalEngine). */
+  private turnCompleteListeners: TurnCompleteListener[] = [];
   private stepRoutingFor: StepRoutingProvider | null = null;
   /**
    * Ask-mode routing: the SDK-shaped message of a turn held until the user
@@ -1569,6 +1571,16 @@ export class SessionManager {
         meta.queuePaused = true;
       }
       meta.steering = undefined;
+      // A goal that was waiting on a turn or mid-judge belonged to the previous
+      // process. Nothing auto-runs after a restart without the user: it comes
+      // back paused, and setting it again resumes it.
+      if (meta.goal && (meta.goal.status === 'active' || meta.goal.status === 'evaluating')) {
+        meta.goal = { ...meta.goal, status: 'paused', pauseReason: 'restart' };
+      }
+      const stepGoal = meta.workflow?.stepGoal;
+      if (stepGoal && (stepGoal.status === 'active' || stepGoal.status === 'evaluating')) {
+        meta.workflow!.stepGoal = { ...stepGoal, status: 'paused', pauseReason: 'restart' };
+      }
       this.sessions.set(meta.id, meta);
     }
     // Pruned by the store on load, so an old tombstone doesn't suppress a session
@@ -1602,8 +1614,25 @@ export class SessionManager {
     this.worker = worker;
   }
 
+  /** Add a listener every turn settle fans out to, in registration order. */
+  addTurnCompleteListener(fn: TurnCompleteListener) {
+    this.turnCompleteListeners.push(fn);
+  }
+
+  /** Alias of addTurnCompleteListener, kept for existing callers. */
   setTurnCompleteListener(fn: TurnCompleteListener) {
-    this.onTurnComplete = fn;
+    this.addTurnCompleteListener(fn);
+  }
+
+  /** Fire every turn-complete listener; one throwing does not starve the rest. */
+  private onTurnComplete(...args: Parameters<TurnCompleteListener>) {
+    for (const fn of this.turnCompleteListeners) {
+      try {
+        fn(...args);
+      } catch (err) {
+        console.error('[sessions] turn-complete listener failed', err);
+      }
+    }
   }
 
   setStepRoutingProvider(fn: StepRoutingProvider) {
@@ -1720,6 +1749,9 @@ export class SessionManager {
     // The ceiling a foreign recipe run set is this machine's own record; a row
     // can neither lift it nor bring one (see SessionMeta.permissionCeiling).
     meta.permissionCeiling = cur?.permissionCeiling;
+    // The goal's condition becomes prompt text here, so a remote row can neither
+    // create nor alter one: the local goal stands, whatever the row says.
+    meta.goal = cur?.goal;
     if (meta.workflow) this.adoptSyncedWorkflow(meta.workflow, cur?.workflow);
     // In-flight statuses were just reset, so no pause is owned by this instance.
     meta.pendingPermissionTool = undefined;
@@ -1757,6 +1789,19 @@ export class SessionManager {
       incoming.task = local!.task;
       incoming.outputs = local!.outputs;
       incoming.lastStepOutput = local!.lastStepOutput;
+    }
+    // Goal conditions become prompt text too: the step goal and every planned one
+    // are this machine's own, never the row's.
+    incoming.stepGoal = sameRun ? local!.stepGoal : undefined;
+    if (incoming.stepOverrides) {
+      const localOverrides = sameRun ? local!.stepOverrides : undefined;
+      incoming.stepOverrides = incoming.stepOverrides.map((o, i) => {
+        const goal = localOverrides?.[i]?.goal;
+        if (!o) return goal ? { goal } : null;
+        const { goal: _remote, ...rest } = o;
+        const out = goal ? { ...rest, goal } : rest;
+        return Object.keys(out).length ? out : null;
+      });
     }
     const held = local?.def;
     if (incoming.def) {
@@ -2942,7 +2987,7 @@ export class SessionManager {
     // persists the meta rather than re-setting the status, and so preserves it).
     this.setStatus(sessionId, 'error', text, kind);
     const interrupted = this.interrupting.delete(sessionId);
-    if (source) this.onTurnComplete?.(sessionId, source, interrupted, true);
+    if (source) this.onTurnComplete(sessionId, source, interrupted, true);
   }
 
   /** Abandon any recovery in flight for this session. Anything that takes over the
@@ -2993,6 +3038,9 @@ export class SessionManager {
     // the step's output consolidates would open a turn on a conversation the next
     // step may drop — and dropping it now kills that turn with it.
     if (meta.workflow?.advancing) return true;
+    // Same for a step goal being judged: the step's next turn is about to be
+    // decided, and the engine drains anything queued into it once it is.
+    if (meta.workflow?.stepGoal?.status === 'evaluating') return true;
     // A steer the engine has not taken in yet: on Claude it may still open a turn
     // of its own after this one settles, so a send now would race it.
     if (meta.steering?.length) return true;
@@ -3132,6 +3180,8 @@ export class SessionManager {
     // Likewise mid-advance (see isBusy). The next step's settle drains the item
     // into that step, and a finished workflow's 'idle' calls back here.
     if (meta.workflow?.advancing) return;
+    // A step goal mid-judge (see isBusy): the engine takes the item itself.
+    if (meta.workflow?.stepGoal?.status === 'evaluating') return;
     // Waiting on a steer's ack (see isBusy). Its turn's settle, or the fallback
     // that hands it back to the queue, calls back here.
     if (meta.steering?.length) return;
@@ -3567,13 +3617,13 @@ export class SessionManager {
    *  bookkeeping (see permissions-and-plan-mode.md). */
   lastPromptForRetry(
     sessionId: string,
-  ): { text: string; source: 'user' | 'workflow'; attachments: PromptAttachment[] } | null {
+  ): { text: string; source: TurnSource; attachments: PromptAttachment[] } | null {
     // A compaction emits no 'user' event, so stripping changes nothing here —
     // applied anyway so the invariant is "turn scans never see compact spans".
     const events = withoutCompactSpans(this.store.loadTranscript(sessionId));
     const last = events.filter((e) => e.kind === 'user').at(-1);
     const data = last?.data as
-      | { text?: string; source?: 'user' | 'workflow'; attachments?: Attachment[] }
+      | { text?: string; source?: TurnSource; attachments?: Attachment[] }
       | undefined;
 
     // For the failures where the phrasing is what failed, say so in the re-sent
@@ -3905,7 +3955,7 @@ export class SessionManager {
     meta: SessionMeta,
     turn: {
       text: string;
-      source: 'user' | 'workflow';
+      source: TurnSource;
       attachments?: Attachment[];
       mentions?: PromptMention[];
       actor?: Actor;
@@ -3955,7 +4005,7 @@ export class SessionManager {
   prompt(
     sessionId: string,
     text: string,
-    source: 'user' | 'workflow' = 'user',
+    source: TurnSource = 'user',
     attachments: PromptAttachment[] = [],
     mentions: PromptMention[] = [],
     /** Who sent it. Absent for the owner and for internal callers (workflows,
@@ -4409,7 +4459,7 @@ export class SessionManager {
    * session's directory. A helper with no session — the MCP judge — passes none
    * and keeps the unprefixed Claude-first order.
    */
-  private helper(request: {
+  helper(request: {
     prompt: string;
     systemPrompt: string;
     claudeModel: string;
@@ -4618,7 +4668,7 @@ export class SessionManager {
     const source = meta.turnSource;
     meta.turnSource = undefined;
     this.failTurn(meta.id, 'Stopped before the turn was sent.');
-    if (source) this.onTurnComplete?.(meta.id, source, true, true);
+    if (source) this.onTurnComplete(meta.id, source, true, true);
   }
 
   /**
@@ -5205,10 +5255,10 @@ export class SessionManager {
    * `interrupt()` until the worker's `ended`/`result` settles the turn, and that
    * same edge is what fires `onTurnComplete` (so a running workflow step parks).
    *
-   * Polled rather than hooked on `onTurnComplete`, which is a single listener
-   * owned by WorkflowEngine — a second subscriber would mean rewiring that
-   * ownership for one bounded wait. Answers false on timeout; the caller refuses
-   * with nothing destroyed.
+   * Polled rather than hooked on the turn-complete listeners: those are the
+   * engines' (WorkflowEngine, GoalEngine) long-lived subscriptions, and a
+   * one-shot subscriber for one bounded wait would need its own removal path.
+   * Answers false on timeout; the caller refuses with nothing destroyed.
    */
   private async awaitInterruptSettled(sessionId: string): Promise<boolean> {
     const deadline = Date.now() + this.interruptSettleMs;
@@ -6378,7 +6428,7 @@ export class SessionManager {
       const resultText = resultErrorText(msg as { result?: unknown; errors?: unknown });
 
       const metaNow = this.sessions.get(sessionId);
-      let source: 'user' | 'workflow' = 'user';
+      let source: TurnSource = 'user';
       // A failure being re-driven transparently: the turn is not over, so nothing
       // settles. Everything skipped below runs when it really settles, keyed off
       // that attempt's own resultSeq.
@@ -6456,7 +6506,7 @@ export class SessionManager {
       // A steer the engine never took in during this turn. Before the flush below,
       // which a pending steer holds back.
       if (metaNow) this.settleSteers(metaNow, { interrupted });
-      this.onTurnComplete?.(sessionId, source, interrupted, failed);
+      this.onTurnComplete(sessionId, source, interrupted, failed);
       this.maybeFlush(sessionId);
       void this.summarizeTurn(sessionId, resultSeq);
       // Same class as summarizeTurn: fire-and-forget once the turn has settled.
@@ -6986,7 +7036,7 @@ export class SessionManager {
       // synthetic result above deliberately bypasses handleWorkerEvent, so the
       // spend/token accumulation that lives in the result branch must not re-run.
       // failTurn's setStatus already ran maybeFlush, so no queue nudge is needed here.
-      if (source) this.onTurnComplete?.(sessionId, source, interrupted, true);
+      if (source) this.onTurnComplete(sessionId, source, interrupted, true);
       // A dead token surfacing as a query crash is recovered by failTurn above,
       // which is now the single classification point for every synthetic failure.
       return;
@@ -7042,7 +7092,7 @@ export class SessionManager {
     meta.turnStartedAt = undefined;
     this.liveState(sessionId).permissionWaitMs = 0;
     this.upsert(meta);
-    this.onTurnComplete?.(sessionId, source, true, false); // gated on the interrupt flag above
+    this.onTurnComplete(sessionId, source, true, false); // gated on the interrupt flag above
     this.maybeFlush(sessionId);
   }
 

@@ -3,11 +3,13 @@ import type {
   Attachment,
   ContextCompactData,
   FileSnapshotData,
+  GoalMarkerData,
   PermissionRequestData,
   PlanChatEventData,
   PromptMention,
   ProviderSwitchData,
   TranscriptEvent,
+  TurnSource,
   TurnSummaryData,
   WorkflowMarkerData,
 } from '@lines/shared';
@@ -98,7 +100,7 @@ export type TranscriptItem =
       kind: 'user';
       key: string;
       text: string;
-      source: 'user' | 'workflow';
+      source: TurnSource;
       attachments?: Attachment[];
       mentions?: PromptMention[];
       /** Who sent it. Absent on every row written before sharing existed, and on
@@ -135,6 +137,7 @@ export type TranscriptItem =
       planChat?: PlanChatEventData[];
     }
   | { kind: 'workflow'; key: string; data: WorkflowMarkerData }
+  | { kind: 'goal'; key: string; data: GoalMarkerData }
   | ContextCompactItem
   | ProviderSwitchItem
   | TaskItem;
@@ -395,7 +398,7 @@ export function buildTranscript(
         lastPlanWrite = null;
         const data = event.data as {
           text: string;
-          source?: 'user' | 'workflow';
+          source?: TurnSource;
           attachments?: Attachment[];
           mentions?: PromptMention[];
           actor?: Actor;
@@ -493,6 +496,13 @@ export function buildTranscript(
         sinks.clear();
         lastPlanWrite = null;
         items.push({ kind: 'workflow', key: `w${event.seq}`, data: event.data as WorkflowMarkerData });
+        break;
+      case 'goal':
+        main.openGroup = null;
+        main.lastText = '';
+        sinks.clear();
+        lastPlanWrite = null;
+        items.push({ kind: 'goal', key: `g${event.seq}`, data: event.data as GoalMarkerData });
         break;
       case 'context-compact': {
         const data = event.data as ContextCompactData;
@@ -947,6 +957,8 @@ function reuseItem(old: TranscriptItem, next: TranscriptItem): TranscriptItem {
     }
     case 'workflow':
       return (old as typeof next).data === next.data ? old : next;
+    case 'goal':
+      return (old as typeof next).data === next.data ? old : next;
     case 'context-compact':
       return (old as ContextCompactItem).data === next.data ? old : next;
     case 'provider-switch': {
@@ -1061,6 +1073,7 @@ export function foldAgentTurns(items: TranscriptItem[]): TranscriptItem[] {
       it.kind === 'interject' ||
       it.kind === 'system-init' ||
       it.kind === 'workflow' ||
+      it.kind === 'goal' ||
       it.kind === 'context-compact' ||
       it.kind === 'provider-switch' ||
       (it.kind === 'permission' && it.data.toolName === 'ExitPlanMode') ||

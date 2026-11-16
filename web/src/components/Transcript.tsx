@@ -43,11 +43,13 @@ import {
   IconPlayerSkipForward,
   IconRefresh,
   IconRoute,
+  IconTarget,
   IconZoomIn,
 } from '@tabler/icons-react';
 import type {
   Attachment,
   ContextCompactData,
+  GoalMarkerData,
   PermissionRequestData,
   ProviderSwitchData,
   TranscriptEvent,
@@ -110,6 +112,56 @@ function WorkflowMarker({ data }: { data: WorkflowMarkerData }) {
       labelPosition="center"
       color={data.event === 'workflow-done' ? 'teal' : 'gray'}
     />
+  );
+}
+
+/** Turn count suffix for a goal marker, e.g. " (3/10)". */
+function goalTurns(data: GoalMarkerData): string {
+  return data.turnsUsed != null && data.maxTurns != null ? ` (${data.turnsUsed}/${data.maxTurns})` : '';
+}
+
+const GOAL_PAUSE_LABEL: Record<NonNullable<GoalMarkerData['pauseReason']>, string> = {
+  cap: 'turn limit reached',
+  'turn-failed': 'the turn failed',
+  'judge-failed': 'the goal could not be checked',
+  restart: 'the bridge restarted',
+};
+
+/** Session goal transition: set, judged, paused, stopped or cleared. */
+export function GoalMarker({ data }: { data: GoalMarkerData }) {
+  const label =
+    data.event === 'set'
+      ? `Goal set: ${data.condition ?? ''}`
+      : data.event === 'met'
+        ? `Goal met${goalTurns(data)}`
+        : data.event === 'unmet'
+          ? `Goal not met yet — continuing${goalTurns(data)}`
+          : data.event === 'paused'
+            ? `Goal paused: ${data.pauseReason ? GOAL_PAUSE_LABEL[data.pauseReason] : 'paused'}${goalTurns(data)}`
+            : data.event === 'stopped'
+              ? 'Goal stopped — Stop never auto-continues'
+              : 'Goal cleared';
+  return (
+    <Stack gap={2}>
+      <Divider
+        label={
+          <Group gap={6} wrap="nowrap" style={{ minWidth: 0 }}>
+            <IconTarget size={12} />
+            <Text size="xs" lineClamp={1}>
+              {data.stepIndex !== undefined ? `Step ${data.stepIndex + 1} · ` : ''}
+              {label}
+            </Text>
+          </Group>
+        }
+        labelPosition="center"
+        color={data.event === 'met' ? 'teal' : data.event === 'paused' ? 'orange' : 'gray'}
+      />
+      {data.reason && (
+        <Text size="xs" c="dimmed" ta="center" lineClamp={2} style={{ overflowWrap: 'anywhere' }}>
+          {data.reason}
+        </Text>
+      )}
+    </Stack>
   );
 }
 
@@ -504,6 +556,19 @@ function UserBubble({
           // (min-content) would beat maxWidth: 80% for one long unbreakable token.
           style={{ maxWidth: '80%', minWidth: 0, overflowWrap: 'anywhere' }}
         >
+          {/* Sent by the session goal, not typed: said so the automated turns read apart. */}
+          {item.source === 'goal' && (
+            <Badge
+              size="xs"
+              variant="light"
+              color="grape"
+              leftSection={<IconTarget size={10} />}
+              mb={4}
+              style={{ textTransform: 'none' }}
+            >
+              Goal
+            </Badge>
+          )}
           {item.text && <UserText text={item.text} />}
           {item.mentions && item.mentions.length > 0 && (
             <Group gap={6} mt={item.text ? 6 : 0}>
@@ -876,6 +941,8 @@ const Item = memo(function Item({
       );
     case 'workflow':
       return <WorkflowMarker data={item.data} />;
+    case 'goal':
+      return <GoalMarker data={item.data} />;
     case 'context-compact':
       return (
         <ContextCompactMarker
@@ -1251,13 +1318,13 @@ export function Transcript({
   // Retry only on the trailing failed result of a settled session — a retry
   // button mid-history or during a running turn would be stale/confusing.
   // Use the flat list so it's found even when the result is folded into a turn.
-  // A workflow park marker or a compaction row can land *after* the result without
-  // meaning the turn moved on, so scan past those two kinds only: everything else
+  // A workflow park marker, a goal marker or a compaction row can land *after* the result without
+  // meaning the turn moved on, so scan past those kinds only: everything else
   // (a live permission card, or any content of a new turn) ends the scan.
   let trailing: TranscriptItem | undefined;
   for (let n = built.length - 1; n >= 0; n--) {
     const item = built[n]!;
-    if (item.kind === 'workflow' || item.kind === 'context-compact') continue;
+    if (item.kind === 'workflow' || item.kind === 'goal' || item.kind === 'context-compact') continue;
     trailing = item;
     break;
   }

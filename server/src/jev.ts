@@ -16,7 +16,7 @@
  * answer null, and the turn runs on its current settings — the same contract as
  * runHelperQuery.
  */
-import { DEFAULT_MODELS, REASONING_EFFORTS, type ReasoningEffort, type RoutingRule } from '@lines/shared';
+import { DEFAULT_MODELS, REASONING_EFFORTS, type ReasoningEffort, type RoutingRule, type TurnSource } from '@lines/shared';
 
 export const JEV_URL = 'https://api.typesafe.ai/v1/systemone';
 /** JEV sits in front of every routed turn, so this is short — not the helper's 60s. */
@@ -37,7 +37,7 @@ export interface DecideTurnInput {
   prompt: string;
   currentModel: string;
   currentEffort?: ReasoningEffort;
-  source: 'user' | 'workflow';
+  source: TurnSource;
   lastTurnFailed?: boolean;
   retryWithFeedback?: boolean;
   stepName?: string;

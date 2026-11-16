@@ -26,6 +26,7 @@ import {
   IconPaperclip,
   IconPlayerStop,
   IconSend,
+  IconTarget,
   IconUpload,
   IconX,
   IconZoomIn,
@@ -45,7 +46,7 @@ import {
   providerSwitchBlock,
   rootsForCwd,
 } from '@lines/shared';
-import { formatSpendUsd, stepAfterProviderSwitch, withLiveSpend } from '../lib/format';
+import { formatSpendUsd, isWorkflowFinished, stepAfterProviderSwitch, withLiveSpend } from '../lib/format';
 import { useStepResolver } from '../lib/useStepResolver';
 import { agentLabel, sessionCaps } from '../lib/capabilities';
 import {
@@ -75,6 +76,8 @@ import { linkedMachineHealth } from '../lib/machineHealth';
 import { useCan, useSessionMachine, useSessionMachineHealth } from '../lib/can';
 import { usePresence } from '../lib/presence';
 import { ConfirmModal } from './ConfirmModal';
+import { GoalModal } from './GoalModal';
+import { GoalChip } from './GoalChip';
 import { ContextWindowIndicator } from './ContextWindowIndicator';
 import { SettingsModal, type SettingsSection } from './SettingsModal';
 import { MentionInput, spliceTranscript, type MentionInputHandle } from './MentionInput';
@@ -210,6 +213,7 @@ function PreviewTile({
 export function Composer({ session }: { session: SessionMeta }) {
   const isPhone = useIsPhone();
   const [optionsOpen, setOptionsOpen] = useState(false);
+  const [goalOpen, setGoalOpen] = useState(false);
   const models = useStore((s) => s.models);
   // Settled total plus the in-flight turn's live estimate, while one runs.
   const liveSpend = useStore((s) => s.turnSpend[session.id]);
@@ -224,6 +228,38 @@ export function Composer({ session }: { session: SessionMeta }) {
   // A guest's grant decides which of these controls exist. All true on your own
   // machine; the bridge refuses anything that slips through regardless.
   const canPrompt = useCan('prompt');
+  // On a workflow session the goal is the current step's (the bridge routes it).
+  const workflowRunning = !!session.workflow && !isWorkflowFinished(session);
+  const stepGoal =
+    workflowRunning && session.workflow!.stepGoal?.stepIndex === session.workflow!.stepIndex
+      ? session.workflow!.stepGoal
+      : undefined;
+  const shownGoal = workflowRunning ? stepGoal : session.goal;
+  const goalDisabledReason = !canPrompt ? 'Your access does not allow prompting this session.' : null;
+  const goalButton = (size: 'lg' | undefined, iconSize: number) => (
+    <Tooltip
+      label={
+        goalDisabledReason ??
+        (shownGoal
+          ? 'Edit goal'
+          : workflowRunning
+            ? 'Set a goal for this step — it keeps working until the goal is met'
+            : 'Set a goal — keep going until a condition is met')
+      }
+    >
+      <span style={{ display: 'inline-flex' }}>
+        <ActionIcon
+          variant={shownGoal ? 'light' : 'subtle'}
+          size={size}
+          aria-label="Goal"
+          disabled={goalDisabledReason !== null}
+          onClick={() => setGoalOpen(true)}
+        >
+          <IconTarget size={iconSize} />
+        </ActionIcon>
+      </span>
+    </Tooltip>
+  );
   // The one that actually matters: an accented composer makes typing a prompt
   // into somebody else's machine unaware impossible.
   const remote = useSessionMachine(session.id);
@@ -773,6 +809,15 @@ export function Composer({ session }: { session: SessionMeta }) {
           </Text>
         </Stack>
       )}
+      {shownGoal && (
+        <GoalChip
+          goal={shownGoal}
+          stepIndex={stepGoal?.stepIndex}
+          canEdit={canPrompt}
+          onEdit={() => setGoalOpen(true)}
+          onClear={() => send({ type: 'clearGoal', sessionId: session.id })}
+        />
+      )}
       {(attachments.length > 0 || pendingFiles.length > 0) && (
         <Group gap="xs" px={6} pb={6}>
           {attachments.map((att, i) => (
@@ -944,6 +989,7 @@ export function Composer({ session }: { session: SessionMeta }) {
             <ActionIcon variant="subtle" aria-label="Options" onClick={() => setOptionsOpen(true)}>
               <IconAdjustmentsHorizontal size={18} />
             </ActionIcon>
+            {goalButton(undefined, 18)}
           </Group>
           <Group gap={4} wrap="nowrap">
             {/* Beside Send, where a mic is expected to be: dictating is the
@@ -1003,6 +1049,7 @@ export function Composer({ session }: { session: SessionMeta }) {
                   <IconPaperclip size={16} />
                 </ActionIcon>
               </Tooltip>
+              {goalButton('lg', 16)}
               {/* Visible but disabled for a codex session, deliberately: its absence
               would read as a bug, and the tooltip is where the reduced surface
               gets explained. A span so the tooltip fires over a disabled control.
@@ -1177,6 +1224,7 @@ export function Composer({ session }: { session: SessionMeta }) {
       {/* Opened only from a model's or the mic's warning icon — the pane that carries the
           version, the floor and the install command. Rendered here, exactly as
           SyncIndicator opens its own copy at Diagnostics. */}
+      <GoalModal session={session} opened={goalOpen} onClose={() => setGoalOpen(false)} />
       <SettingsModal
         opened={settingsSection !== null}
         onClose={() => setSettingsSection(null)}

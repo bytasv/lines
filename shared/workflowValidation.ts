@@ -16,9 +16,10 @@ import type {
   ReasoningEffort,
   RoutingRule,
   StepContent,
+  StepGoalSpec,
   WorkflowStepOverride,
 } from './types.ts';
-import { isKnownModel, LEGACY_MODEL_MAP, providerForModel } from './types.ts';
+import { clampGoalMaxTurns, isKnownModel, LEGACY_MODEL_MAP, providerForModel } from './types.ts';
 // Safe despite the cycle note below: providers.ts imports only *types* from
 // './types.ts', so it holds no runtime binding that could still be uninitialized.
 import { capabilitiesFor } from './providers.ts';
@@ -267,8 +268,10 @@ export function sanitizeStepOverrides(
   const allowed: readonly ReasoningEffort[] = capabilitiesFor('anthropic').reasoningEfforts;
   return raw.slice(0, stepCount).map((entry): WorkflowStepOverride | null => {
     if (!entry || typeof entry !== 'object') return null;
-    const { model, reasoningEffort } = entry as Record<string, unknown>;
+    const { model, reasoningEffort, goal } = entry as Record<string, unknown>;
     const out: WorkflowStepOverride = {};
+    const cleanGoal = sanitizeStepGoal(goal);
+    if (cleanGoal) out.goal = cleanGoal;
     if (typeof model === 'string' && model && providerForModel(model) === 'anthropic') {
       out.model = model;
     }
@@ -276,6 +279,25 @@ export function sanitizeStepOverrides(
     else if (allowed.includes(reasoningEffort as ReasoningEffort)) {
       out.reasoningEffort = reasoningEffort as ReasoningEffort;
     }
-    return 'model' in out || 'reasoningEffort' in out ? out : null;
+    return Object.keys(out).length ? out : null;
   });
+}
+
+/** Longest goal condition accepted; same cap the bridge applies to a session goal. */
+export const GOAL_CONDITION_MAX = 4_000;
+
+/**
+ * A client-sent step goal, cleaned: trimmed and capped condition, clamped turn
+ * cap, `onMet` defaulting to advance. Null when there is no usable condition.
+ */
+export function sanitizeStepGoal(raw: unknown): StepGoalSpec | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const { condition, maxTurns, onMet } = raw as Record<string, unknown>;
+  const text = typeof condition === 'string' ? condition.trim().slice(0, GOAL_CONDITION_MAX) : '';
+  if (!text) return null;
+  return {
+    condition: text,
+    maxTurns: clampGoalMaxTurns(maxTurns),
+    onMet: onMet === 'wait' ? 'wait' : 'advance',
+  };
 }

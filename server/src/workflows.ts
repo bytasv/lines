@@ -13,6 +13,12 @@ import type {
   WorkflowMarkerData,
   WorkflowState,
   WorkflowStepOverride,
+  TurnSource,
+  GoalMarkerData,
+  GoalOnMet,
+  GoalState,
+  StepGoal,
+  StepGoalSpec,
 } from '@lines/shared';
 import {
   isSessionActive,
@@ -22,10 +28,12 @@ import {
   providerSwitchNeedsFreshStart,
   resolveModelId,
   rootsForCwd,
+  sanitizeStepGoal,
   sanitizeStepOverrides,
 } from '@lines/shared';
 import type { Store } from './store.ts';
 import type { SessionManager } from './sessions.ts';
+import { goalContinuationText, goalDrivesTurns, goalStartText, type GoalVerdict } from './goals.ts';
 import { isHeld, ItemTrust, markAfterSave, runnableDigest, settledHold, unmarked, vouchedFor } from './syncSignature.ts';
 import { groupByRepo, repoBranch, type RepoGroup } from './git.ts';
 
@@ -309,8 +317,21 @@ export class WorkflowEngine {
   /** Armed watchdogs, keyed by session (see armSettleWatchdog). */
   private settleWatchdogs = new Map<string, ReturnType<typeof setTimeout>>();
 
+  /** Judges a step goal's condition against the step's last reply (GoalEngine.evaluate). */
+  private goalJudge: ((sessionId: string, condition: string) => Promise<GoalVerdict | null>) | null = null;
+  /** Sessions whose step-goal judge call is in flight. */
+  private goalJudging = new Set<string>();
+
   devReloadBlockers(): string[] {
-    return this.settleWatchdogs.size ? ['workflow continuation scheduled'] : [];
+    return [
+      ...(this.settleWatchdogs.size ? ['workflow continuation scheduled'] : []),
+      ...(this.goalJudging.size ? ['step goal evaluation in flight'] : []),
+    ];
+  }
+
+  /** Wired by userContext once GoalEngine exists; without it a step goal's check fails (and parks). */
+  setGoalJudge(fn: (sessionId: string, condition: string) => Promise<GoalVerdict | null>) {
+    this.goalJudge = fn;
   }
 
 
@@ -428,6 +449,8 @@ export class WorkflowEngine {
     wf.advancing = false;
     wf.stepFailure = undefined;
     wf.lastStepOutput = undefined;
+    // The goal was judging turns that no longer exist; the parked step starts clean.
+    wf.stepGoal = undefined;
 
     let stepIndex: number | null = null;
     for (const event of this.store.loadTranscript(sessionId)) {
@@ -1184,6 +1207,8 @@ export class WorkflowEngine {
   ) {
     const meta = this.sessions.get(sessionId);
     if (!meta) return;
+    // Mutually exclusive with a live goal (see GoalEngine.setGoal for the other side).
+    if (goalDrivesTurns(meta.goal)) return;
     const overrides = sanitizeStepOverrides(stepOverrides, wf.steps.length);
     meta.workflow = {
       workflowId: wf.id,
@@ -1267,6 +1292,9 @@ export class WorkflowEngine {
   ): boolean {
     const meta = this.sessions.get(sessionId);
     if (!meta?.workflow || meta.workflow.started) return false;
+    // A goal and a workflow both drive turns; a live goal keeps the workflow from
+    // starting, and the prompt goes through as an ordinary one.
+    if (goalDrivesTurns(meta.goal)) return false;
     meta.workflow.started = true;
     meta.workflow.task = userText;
     this.sessions.maybeAutoName(sessionId, userText);
@@ -1422,6 +1450,7 @@ export class WorkflowEngine {
       event: feedback !== undefined ? 'retried' : 'started',
       feedback,
     });
+    if (entry) this.seedStepGoal(sessionId, meta.workflow, i);
 
     // Per-step model + permission mode take effect before the prompt is queued.
     // Both carry this run's override for the step, if any (see effectiveContent).
@@ -1499,8 +1528,122 @@ export class WorkflowEngine {
       this.sessions.resetClaudeSession(sessionId);
     }
 
+    // The agent works better toward a target it can see: a goal the step entered
+    // with rides its first prompt.
+    const goal = meta.workflow.stepGoal;
+    if (entry && goal?.stepIndex === i && goalDrivesTurns(goal)) {
+      prompt += `\n\nThis step has a goal. Keep working until it holds: ${goal.condition}`;
+    }
+
     if (feedback !== undefined) this.sessions.markRetry(sessionId);
     this.sessions.prompt(sessionId, prompt, 'workflow', attachments, [], actor);
+  }
+
+  /**
+   * The goal step `i` starts with: one planned for it in this run's overrides, or
+   * one set on it while it was still waiting to start. Anything else (a goal left
+   * from another step) is dropped.
+   */
+  private seedStepGoal(sessionId: string, state: WorkflowState, i: number) {
+    const existing = state.stepGoal;
+    if (existing?.stepIndex === i && goalDrivesTurns(existing)) return;
+    const planned = state.stepOverrides?.[i]?.goal;
+    state.stepGoal = planned ? this.newStepGoal(i, planned) : undefined;
+    if (state.stepGoal) this.goalMarker(sessionId, state.stepGoal, 'set');
+  }
+
+  private newStepGoal(i: number, spec: StepGoalSpec, actor?: Actor): StepGoal {
+    return {
+      condition: spec.condition,
+      maxTurns: spec.maxTurns,
+      onMet: spec.onMet,
+      turnsUsed: 0,
+      status: 'active',
+      setAt: Date.now(),
+      stepIndex: i,
+      ...(actor ? { actor } : {}),
+    };
+  }
+
+  private goalMarker(
+    sessionId: string,
+    goal: StepGoal,
+    event: GoalMarkerData['event'],
+    extra: Partial<GoalMarkerData> = {},
+  ) {
+    const data: GoalMarkerData = {
+      event,
+      stepIndex: goal.stepIndex,
+      turnsUsed: goal.turnsUsed,
+      maxTurns: goal.maxTurns,
+      ...(event === 'set' ? { condition: goal.condition, onMet: goal.onMet } : {}),
+      ...extra,
+    };
+    this.sessions.emitEvent(sessionId, 'goal', data);
+  }
+
+  /** Move a step goal to `status` (dropping a stale pause reason) and persist. */
+  private updateStepGoal(sessionId: string, goal: StepGoal, patch: Partial<GoalState>) {
+    Object.assign(goal, patch);
+    if (patch.status && patch.status !== 'paused') delete goal.pauseReason;
+    this.sessions.persistMeta(sessionId);
+  }
+
+  private pauseStepGoal(
+    sessionId: string,
+    goal: StepGoal,
+    pauseReason: NonNullable<GoalState['pauseReason']>,
+    reason?: string,
+  ) {
+    this.updateStepGoal(sessionId, goal, { status: 'paused', pauseReason });
+    this.goalMarker(sessionId, goal, 'paused', { pauseReason, ...(reason ? { reason } : {}) });
+  }
+
+  /**
+   * Set, replace or resume the current step's goal (the `setGoal` message on a
+   * workflow session). A running step is judged when its turn settles; a parked
+   * one goes back to work now; a step not started yet takes it on entry.
+   */
+  setStepGoal(
+    sessionId: string,
+    condition: string,
+    maxTurns: number | undefined,
+    onMet: GoalOnMet | undefined,
+    actor?: Actor,
+  ): { ok: true } | { ok: false; reason: string } {
+    const meta = this.sessions.get(sessionId);
+    const state = meta?.workflow;
+    if (!meta || !state) return { ok: false, reason: 'This session has no workflow.' };
+    const spec = sanitizeStepGoal({ condition, maxTurns, onMet });
+    if (!spec) return { ok: false, reason: 'Describe when the goal is met.' };
+    const i = state.stepIndex;
+    if (state.stepStatuses[i] === 'done') return { ok: false, reason: 'This workflow has finished.' };
+    if (state.advancing) return { ok: false, reason: 'The step is wrapping up — set the goal on the next one.' };
+    const goal = this.newStepGoal(i, spec, actor);
+    state.stepGoal = goal;
+    this.goalMarker(sessionId, goal, 'set');
+    // A parked step goes back to work toward it — unless a turn is live over the
+    // park (a manual compaction), whose settle leaves the goal for the next turn.
+    if (
+      state.started &&
+      state.stepStatuses[i] === 'waiting-approval' &&
+      !isSessionInterruptible(meta.status)
+    ) {
+      this.iterateStep(sessionId, goalStartText(spec.condition), undefined, actor, 'goal');
+      return { ok: true };
+    }
+    this.sessions.persistMeta(sessionId);
+    return { ok: true };
+  }
+
+  /** Drop the current step's goal; the step falls back to its own advance/park rule. */
+  clearStepGoal(sessionId: string) {
+    const state = this.sessions.get(sessionId)?.workflow;
+    const goal = state?.stepGoal;
+    if (!state || !goal) return;
+    state.stepGoal = undefined;
+    this.goalMarker(sessionId, goal, 'cleared');
+    this.sessions.persistMeta(sessionId);
   }
 
   /**
@@ -1602,7 +1745,7 @@ export class WorkflowEngine {
 
   private onWorkflowTurnComplete(
     sessionId: string,
-    source: 'user' | 'workflow',
+    source: TurnSource,
     interrupted: boolean,
     failed: boolean,
   ) {
@@ -1643,10 +1786,13 @@ export class WorkflowEngine {
     // error skipped the settle, then the user typed). It does nothing here except
     // consume an explicit force-advance stamped for this step — otherwise that step
     // would sit at 'running' forever.
-    if (source !== 'workflow' && !forced) return;
+    // A goal's own turns are the step's turns, same as the engine's.
+    const goal = meta.workflow.stepGoal?.stepIndex === i ? meta.workflow.stepGoal : undefined;
+    const stepTurn = source === 'workflow' || (source === 'goal' && !!goal);
+    if (!stepTurn && !forced) return;
     this.clearSettleWatchdog(sessionId); // any settle for this step ends the watchdog's job
 
-    if (source === 'workflow') {
+    if (stepTurn) {
       // Accumulate active-turn duration onto the step (retries add to the same
       // slot). Cost and tokens were charged above, from every result the step's
       // turns settled rather than this one alone.
@@ -1664,6 +1810,11 @@ export class WorkflowEngine {
     if (interrupted && !forced) {
       meta.workflow.advanceOnComplete = undefined;
       meta.workflow.advanceOnCompleteStep = undefined;
+      // Stop never auto-continues: the goal stops with the step's park below.
+      if (goal && goalDrivesTurns(goal)) {
+        this.updateStepGoal(sessionId, goal, { status: 'stopped' });
+        this.goalMarker(sessionId, goal, 'stopped');
+      }
     } else if (meta.workflow.advanceOnComplete && stamped) {
       // A plan approved mid-step — or a force-advance of a running step — advances
       // straight to the next step.
@@ -1673,13 +1824,50 @@ export class WorkflowEngine {
       this.marker(sessionId, { stepIndex: i, stepName: this.stepName(step), event });
       void this.advance(sessionId);
       return;
-    } else if (!failed && this.stepContent(step)?.autoAdvance) {
+    } else if (goal && goalDrivesTurns(goal)) {
+      if (failed) {
+        // No retry loop: a failed turn parks below, and the goal waits with it.
+        this.pauseStepGoal(sessionId, goal, 'turn-failed');
+      } else {
+        // The goal, not the step's own gate, decides what happens next.
+        void this.judgeStepGoal(sessionId, i, goal);
+        return;
+      }
+    }
+    // Stop overrides autoAdvance: a stopped step only ever parks (or takes a
+    // queued follow-up).
+    if (interrupted && !forced) this.iterateQueuedOrPark(sessionId, meta, i, step, failed);
+    else this.settleStep(sessionId, meta, i, step, failed);
+  }
+
+  /**
+   * A settled step turn with no goal deciding: auto-advance, else a queued
+   * follow-up iterates, else park.
+   */
+  private settleStep(
+    sessionId: string,
+    meta: SessionMeta,
+    i: number,
+    step: WorkflowDef['steps'][number],
+    failed: boolean,
+  ) {
+    if (!failed && this.stepContent(step)?.autoAdvance) {
       // A failed turn produced no deliverable to hand on, so it parks below instead
       // — an explicit force-advance above still wins, that user asked for it.
       void this.advance(sessionId);
       return;
     }
+    this.iterateQueuedOrPark(sessionId, meta, i, step, failed);
+  }
 
+  private iterateQueuedOrPark(
+    sessionId: string,
+    meta: SessionMeta,
+    i: number,
+    step: WorkflowDef['steps'][number],
+    failed: boolean,
+  ) {
+    if (!meta.workflow) return;
     // A follow-up the user sent while the step was still running supersedes the
     // park: re-run the same step with it instead of stranding it in the queue.
     const queued = this.sessions.takeQueuedText(sessionId);
@@ -1706,6 +1894,78 @@ export class WorkflowEngine {
       event: 'waiting-approval',
       ...(failed ? { failed: true } : {}),
     });
+  }
+
+  /**
+   * Judge step `i`'s goal against the turn that just settled, then iterate, advance
+   * or park. The step stays 'running' meanwhile, and SessionManager counts an
+   * evaluating step goal as busy, so a prompt typed now is queued, not raced.
+   */
+  private async judgeStepGoal(sessionId: string, i: number, goal: StepGoal) {
+    this.updateStepGoal(sessionId, goal, { status: 'evaluating' });
+    this.goalJudging.add(sessionId);
+    let verdict: GoalVerdict | null = null;
+    try {
+      verdict = this.goalJudge ? await this.goalJudge(sessionId, goal.condition) : null;
+    } catch {
+      verdict = null;
+    } finally {
+      this.goalJudging.delete(sessionId);
+    }
+
+    const meta = this.sessions.get(sessionId);
+    const state = meta?.workflow;
+    const wf = state && this.resolveFor(state);
+    const step = wf?.steps[i];
+    // The step moved on (approve, force-advance, rewind) while the judge ran.
+    if (!meta || !state || !step || state.stepIndex !== i || state.stepStatuses[i] !== 'running') return;
+    // A turn opened under the judge (a recovery, a resumed conversation): its own
+    // settle decides.
+    if (isSessionInterruptible(meta.status)) {
+      if (state.stepGoal === goal) this.updateStepGoal(sessionId, goal, { status: 'active' });
+      return;
+    }
+    // Re-read through a widened type: the await above is what can move it.
+    const status = goal.status as GoalState['status'];
+    if (state.stepGoal !== goal || status !== 'evaluating') {
+      // Cleared or replaced while the judge ran. A replacement is judged against
+      // the same turn; with no goal left the step settles by its own rule.
+      const next = state.stepGoal?.stepIndex === i ? state.stepGoal : undefined;
+      if (next && goalDrivesTurns(next)) void this.judgeStepGoal(sessionId, i, next);
+      else this.settleStep(sessionId, meta, i, step, false);
+      return;
+    }
+
+    const lastVerdict = verdict ? { ...verdict, at: Date.now() } : undefined;
+    // Something the user queued while the judge ran goes first; the goal is
+    // judged again when that turn settles.
+    const queued = this.sessions.takeQueuedText(sessionId);
+    if (queued) {
+      this.updateStepGoal(sessionId, goal, { status: 'active', ...(lastVerdict ? { lastVerdict } : {}) });
+      this.iterateStep(sessionId, queued.text, queued.attachments);
+      return;
+    }
+    if (!verdict) {
+      this.pauseStepGoal(sessionId, goal, 'judge-failed');
+      this.iterateQueuedOrPark(sessionId, meta, i, step, false);
+      return;
+    }
+    if (verdict.met) {
+      this.updateStepGoal(sessionId, goal, { status: 'met', lastVerdict });
+      this.goalMarker(sessionId, goal, 'met', { reason: verdict.reason });
+      if (goal.onMet === 'advance') void this.advance(sessionId);
+      else this.iterateQueuedOrPark(sessionId, meta, i, step, false);
+      return;
+    }
+    if (goal.turnsUsed >= goal.maxTurns) {
+      goal.lastVerdict = lastVerdict;
+      this.pauseStepGoal(sessionId, goal, 'cap', verdict.reason);
+      this.iterateQueuedOrPark(sessionId, meta, i, step, false);
+      return;
+    }
+    this.updateStepGoal(sessionId, goal, { status: 'active', lastVerdict, turnsUsed: goal.turnsUsed + 1 });
+    this.goalMarker(sessionId, goal, 'unmet', { reason: verdict.reason });
+    this.sessions.prompt(sessionId, goalContinuationText(goal.condition, verdict.reason), 'goal', [], [], goal.actor);
   }
 
   /**
@@ -1774,6 +2034,8 @@ export class WorkflowEngine {
     text: string,
     attachments?: PromptAttachment[],
     actor?: Actor,
+    /** `'goal'` when a step goal re-opens a parked step. */
+    source: TurnSource = 'workflow',
   ) {
     const meta = this.sessions.get(sessionId);
     const wf = meta?.workflow && this.resolveFor(meta.workflow);
@@ -1790,7 +2052,7 @@ export class WorkflowEngine {
       stepName: this.stepName(wf.steps[i]),
       event: 'retried',
     });
-    this.sessions.prompt(sessionId, text, 'workflow', attachments, [], actor);
+    this.sessions.prompt(sessionId, text, source, attachments, [], actor);
   }
 
   approve(sessionId: string, stepIndex: number) {
@@ -1960,6 +2222,8 @@ export class WorkflowEngine {
     const i = meta.workflow.stepIndex;
     meta.workflow.stepStatuses[i] = 'done';
     meta.workflow.stepFailure = undefined; // the workflow is moving on from this step
+    // A goal is one step's; the next step seeds its own on entry.
+    meta.workflow.stepGoal = undefined;
     // Consolidating an iterated step runs a real query, so the gap before the next
     // step starts is seconds long with nothing else broadcast in it. Raise the
     // in-flight flag *before* the await — every path from the WS handler to here is

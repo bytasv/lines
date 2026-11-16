@@ -461,6 +461,14 @@ workflow's step statuses. `SessionRow` computes
 same `SessionMeta` already used for `sessionRowMeta`. No new message type, no server or store
 change — purely a render-time derivation from `session.workflow.stepStatuses`.
 
+### Step goals
+
+A step can carry a goal (see [session-goals](session-goals.md)). While it is live, a settled
+step turn is judged instead of taking the autoAdvance or park path: met advances or parks per
+the goal's when-met choice, unmet iterates the same step, and a cap, judge failure, Stop or
+failed turn parks the step with the goal paused or stopped. Forced and plan-approval advances
+still win, and advance, approve, force-advance and rewind all drop the live goal.
+
 ## Dependencies
 
 `@tabler/icons-react` `IconCircleCheckFilled` for the sidebar finished icon (already an
@@ -526,6 +534,8 @@ installed icon, no new package). No other new dependencies.
 
 ## Business rules
 
+- A step with a live step goal is decided by the goal at its settle, not by autoAdvance; Stop
+  still parks it.
 - Plain Stop during a running workflow step always parks it at `waiting-approval`; it never
   advances. Advancing requires an explicit action: Approve (once parked) or the stepper's
   "Mark as completed" checkmark (while still running).

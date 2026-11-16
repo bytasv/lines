@@ -1,6 +1,16 @@
 {
   "web": [
     {
+      "version": "0.1.40",
+      "date": "2026-11-16",
+      "items": [
+        {
+          "text": "Set a goal on a session or a workflow step with the new target button, and it keeps working on its own until the goal is met, up to a turn limit you choose; a step can then move on to the next one by itself or wait for your approval.",
+          "image": "web-0.1.40-goals.png"
+        }
+      ]
+    },
+    {
       "version": "0.1.39",
       "date": "2026-11-16",
       "items": [
@@ -413,6 +423,10 @@
     {
       "text": "Questions about a pending plan are answered by a read-only copy of the conversation, so asking never changes the plan or any files.",
       "image": "desktop-next-plan-ask-readonly.png"
+    },
+    {
+      "text": "Goals are checked after every turn: Stop always halts them, and a failed turn, a failed check or an app restart pauses them until you resume.",
+      "image": "desktop-next-goals.png"
     }
   ]
 }

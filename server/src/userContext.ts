@@ -12,6 +12,7 @@ import { SpendHistory } from './spendHistory.ts';
 import { PushNotifier } from './pushNotifier.ts';
 import { UsagePoller } from './usage.ts';
 import { WorkflowEngine } from './workflows.ts';
+import { GoalEngine } from './goals.ts';
 import { RecipeEngine } from './recipes.ts';
 import { StorageSyncClient, THROTTLED } from './sync.ts';
 import { ProjectKeyRegistry } from './projectKeys.ts';
@@ -240,6 +241,8 @@ export interface UserContext {
   memory: MemorySyncer;
   sessions: SessionManager;
   workflows: WorkflowEngine;
+  /** Session goals: judge each settled turn, auto-continue until met. */
+  goals: GoalEngine;
   recipes: RecipeEngine;
   usage: UsagePoller;
   /** This machine's day-resolution spend ledger, for the hello snapshot. */
@@ -539,6 +542,10 @@ export function buildUserContext(
   // Codex only: a plan step's turn is already settled when its card is answered,
   // so the advance has to be asked for rather than fall out of the settle.
   sessions.onPlanApproved = (sessionId, stepIndex) => workflows.approve(sessionId, stepIndex);
+  // Registered after WorkflowEngine, so a settle reaches the workflow first.
+  const goals = new GoalEngine(sessions);
+  // Step goals are judged by the same model and prompt as session goals.
+  workflows.setGoalJudge((sessionId, condition) => goals.evaluate(sessionId, condition));
   const recipes = new RecipeEngine(store, broadcast, userId);
 
   // Backfill: sessions that predate project keys (and any checkout opened while
@@ -711,6 +718,7 @@ export function buildUserContext(
     memory,
     sessions,
     workflows,
+    goals,
     recipes,
     usage,
     spendHistory,
