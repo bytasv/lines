@@ -96,7 +96,8 @@ relay pipes frames between them, and the UI that gates all of it.
 - `Tiltfile` — pins both ports so its readiness probes have fixed targets; the opt-in `relay`
   resource; the `pair-device` resource
 - `.env.example` — `LINES_BRIDGE_PORT`, `LINES_WORKER_PORT`, `LINES_INSTANCE`;
-  `RELAY_AGENT_PING_MS`, `RELAY_AGENT_DEAD_MS`, `RELAY_REVERIFY_MS`, `LINES_RELAY_IDLE_MS`
+  `RELAY_AGENT_PING_MS`, `RELAY_AGENT_DEAD_MS`, `RELAY_REVERIFY_MS`, `LINES_RELAY_IDLE_MS`,
+  `LINES_RELAY_DIAL_TIMEOUT_MS`
 - `server/src/userContext.ts` — `BrowserLink`, `linkSendAction`, `broadcast`
 - `server/src/index.ts` — `BRIDGE_VERSION`, per-socket handlers, `claimBridgeLock`/
   `releaseBridgeLock`/`resolveRelayIdentity`, the single-instance `bridge.lock`,
@@ -490,6 +491,13 @@ them; this stays entirely inside `RelayClient` as a peripheral — it only slows
 never parks, so it self-heals the moment the other bridge goes away, with no relay-side or
 protocol change.
 
+A dial is bounded too. The idle watchdog only guards an OPEN socket, so a dial that never completed
+(a network switch mid-handshake, DNS on the new interface not answering) used to sit in CONNECTING
+forever and never re-dial. `connect()` now gives the handshake `LINES_RELAY_DIAL_TIMEOUT_MS` (15s),
+and a second watchdog a few seconds later terminates a socket still connecting. Both end in the
+ordinary `close` path, so the dial retries through the same backoff. A dial the relay never answers
+is treated as a failed dial, not as a live link.
+
 ### Pairing a machine
 
 1. The machine generates a random secret, keeps it, and calls `register` with only its sha256
@@ -670,7 +678,8 @@ refuse.
   through a real listener on `127.0.0.1`, this machine's page admitted, a cross-site page refused
   `403` before any `hello`, a rebinding `Host` refused `421`.
 - `server/src/relayClient.dial.test.ts` — the device secret rides the header, and neither the dial
-  URL nor the bridge's log carries it.
+  URL nor the bridge's log carries it; a server that accepts TCP and never answers the upgrade is
+  dialled again once the dial timeout passes.
 - `server/src/locality.test.ts` — every shape a loopback `remoteAddress` arrives in, and that
   anything unrecognised is not local.
 - `server/src/guestAccess.test.ts` / `server/src/messageAuthz.test.ts` (token rules) — a refresh

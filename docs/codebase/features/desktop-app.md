@@ -728,6 +728,9 @@ in `LINES_BRIDGE_DIRECT=token` mode.
 - The desktop window has its own cookie jar, separate from Safari or Chrome — signing in in a
   browser does not sign in the window and vice versa. The dev instance has its own `userData`, so
   its own jar too.
+- The "Can't reach Lines" offline page retries the app by itself: when the window's network comes
+  back (`online`), every 10 seconds while the network reports up, and on system wake or unlock
+  while the window still shows that page. It never retries from the page itself, only the app URL.
 
 ## Architectural rules
 

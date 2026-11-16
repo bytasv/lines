@@ -61,6 +61,7 @@ import {
   worktreePaths,
 } from '@lines/shared';
 import { send, sendToMachine, switchDevice } from './ws';
+import { clearRefusalFor, type ConnectRefusal } from './lib/connectRefusal';
 import {
   clearSent,
   failSending,
@@ -1280,8 +1281,11 @@ interface UiState {
    * is enrolled — and the only place to enrol one used to be inside the app shell,
    * which never loads, because the channel was refused. Without this a new
    * browser spins forever with no way forward.
+   *
+   * Keyed to the machine that refused: the window links to several machines,
+   * and only the one that refused may show its refusal (see refusalFor).
    */
-  e2eeRefusal: string | null;
+  e2eeRefusal: ConnectRefusal | null;
   /**
    * User-managed MCP servers. Server-authoritative and never cached in
    * localStorage, for the same two reasons as the guard allowlist — and one more:
@@ -1452,8 +1456,10 @@ interface UiState {
   resolveMemoryReview: (accept: boolean) => void;
   /** Leaves the memory review pending and remembers the dismissal. */
   closeMemoryReview: () => void;
-  /** Set when a machine refuses this browser for want of an enrolled key; cleared by a `hello`. */
-  setE2eeRefusal: (reason: string | null) => void;
+  /** Set when a machine refuses this browser's channel; cleared per machine (enroll, join link, its `hello`). */
+  setE2eeRefusal: (deviceId: string, reason: string) => void;
+  /** Clear `deviceId`'s refusal only; another machine's stays. */
+  clearE2eeRefusal: (deviceId: string) => void;
   /** Add a connection. `headers` are secret values; they go up and never come back. */
   addMcpConnection: (connection: McpConnectionInput, headers?: Record<string, string>) => void;
   updateMcpConnection: (
@@ -2078,7 +2084,12 @@ export const useStore = create<UiState>((set, get) => {
       memoryReviewOpen: false,
       memoryReviewDismissedAt: state.memoryReview?.detectedAt ?? state.memoryReviewDismissedAt,
     })),
-  setE2eeRefusal: (reason) => set({ e2eeRefusal: reason }),
+  setE2eeRefusal: (deviceId, reason) => set({ e2eeRefusal: { deviceId, reason } }),
+  clearE2eeRefusal: (deviceId) =>
+    set((s) => {
+      const next = clearRefusalFor(s.e2eeRefusal, deviceId);
+      return next === s.e2eeRefusal ? {} : { e2eeRefusal: next };
+    }),
 
   // Intent messages, not a list save, for the same reason the guard's are — and
   // one more: the bridge holds header values this client cannot round-trip.

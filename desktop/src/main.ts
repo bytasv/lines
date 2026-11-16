@@ -198,6 +198,8 @@ const lastPower: Record<string, number> = {};
 let relayChangedAt = 0;
 let tray: Tray | null = null;
 let win: BrowserWindow | null = null;
+/** The main window is on the "Can't reach Lines" data page, so a wake should reload it. */
+let offlinePageShown = false;
 let pairingWindow: BrowserWindow | null = null;
 /** The encryption-enrollment window, when one is open. Its own, not the pairing
  *  window's: the two answer different questions and can both be up at once. */
@@ -1840,6 +1842,9 @@ function openWindow() {
     void w.loadURL(appUrlForOwnWindow());
   }
   attachNavigationGuards(w, 'app');
+  w.webContents.on('did-navigate', (_event, url) => {
+    if (w === win && !url.startsWith('data:')) offlinePageShown = false;
+  });
   w.webContents.on('did-fail-load', (_event, code, description, url, isMainFrame) => {
     // -3 is ERR_ABORTED, which every cancelled navigation reports.
     if (!isMainFrame || code === -3) return;
@@ -1850,6 +1855,7 @@ function openWindow() {
       switchToLocal(`load failed: ${description}`);
       return;
     }
+    if (w === win) offlinePageShown = true;
     void w.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(loadErrorHtml(description))}`);
     // Pairing must not depend on the hosted app: if it is unreachable, the code
     // still has to reach the user.
@@ -2006,6 +2012,12 @@ function mirrorRendererLog(w: BrowserWindow) {
  */
 function nudgeWindowAwake(reason: 'resume' | 'unlock-screen'): void {
   if (!win || win.isDestroyed()) return;
+  // The offline page has no app to nudge: try the app itself again.
+  if (offlinePageShown && win.webContents.getURL().startsWith('data:')) {
+    shellLog(`[window] ${reason} on the offline page — reloading the app`);
+    void win.loadURL(appUrlForOwnWindow());
+    return;
+  }
   win.webContents
     .executeJavaScript(`document.dispatchEvent(new Event('visibilitychange'))`)
     .catch((err: Error) => shellLog(`[window] wake nudge (${reason}) failed: ${err.message}`));
@@ -2033,7 +2045,17 @@ function loadErrorHtml(reason: string): string {
   <p class="hint">${escapeHtml(reason)}<br>
   Sessions on this machine keep running. Check your connection, then
   <a href="${escapeHtml(appUrl())}">try again</a>.</p>
-</div>`;
+</div>
+<script>
+  // Recover without a click: when the network comes back, and every 10s while
+  // it claims to be up. A still-failing load just lands back on this page.
+  (function () {
+    var target = ${JSON.stringify(appUrl()).replace(/</g, '\\u003c')};
+    function retry() { location.replace(target); }
+    addEventListener('online', retry);
+    setInterval(function () { if (navigator.onLine) retry(); }, 10000);
+  })();
+</script>`;
 }
 
 /**

@@ -2599,7 +2599,8 @@
         "pendingPairCode",
         "takePairCodeFromUrl",
         "relayLink",
-        "connectionPolicy tokenGated mode"
+        "connectionPolicy tokenGated mode",
+        "RELAY_DIAL_TIMEOUT_MS"
       ],
       "tests": [
         "storage/src/schema.credentials.test.ts",
@@ -2700,7 +2701,8 @@
         "every id that becomes a path under ~/.lines-app passes isValidStoreId: a relay channel whose attested user id or grant host id is malformed is closed 1008 before any context exists, userStoreRoot and UserRegistry.get throw on one, a malformed session id has no transcript and deleting it is a no-op, and loadTranscript for a session the context does not know answers empty",
         "the bridge makes ~/.lines-app 0700 at startup whoever started it (Tilt and a terminal start it without the desktop shell), and creates transcripts and rewind sidecars 0600",
         "the pairing code reaches the web app only in a fragment and is stashed in sessionStorage across sign-in",
-        "claiming a handed-over pairing code always needs one explicit click"
+        "claiming a handed-over pairing code always needs one explicit click",
+        "a relay dial that never opens or errors is abandoned after LINES_RELAY_DIAL_TIMEOUT_MS and re-dialled through the ordinary backoff; a stalled dial is never treated as a live link"
       ],
       "architecturalRules": [
         "only the secret's hash is stored, never the plaintext, so a database compromise cannot yield anything that impersonates a device",
@@ -2948,7 +2950,8 @@
         "pollForeignBridge",
         "foreignRelay",
         "lockFreeTicks",
-        "ForeignBridge"
+        "ForeignBridge",
+        "loadErrorHtml"
       ],
       "tests": [
         "server/src/updates.test.ts",
@@ -2999,7 +3002,8 @@
         "the tray's Collect diagnostics… zips both log generations, run/*/*.json with token deleted, the bridge lock and a summary.json into ~/.lines-app/diagnostics via /usr/bin/ditto; device.json is never copied",
         "ship.mjs stamps desktopPending in changelog.json into a new desktop release when it commits a version bump, in the same commit; the release workflow's guard job fails if desktopPending is non-empty because CI cannot commit the stamp (see whats-new)",
         "every launch (manual start, login item, update restart, relaunch) opens Lines per openIn: the app window, or the system browser when openIn=browser; while unpaired it carries the pairing code in the URL fragment (pair=<code>, or #pair= in the browser); the data-URL pairing window stays in the tray and opens if the app window fails to load",
-        "the local fallback window is off unless LINES_LOCAL_FALLBACK=1, and its shell never shows an error page for a cloud outage"
+        "the local fallback window is off unless LINES_LOCAL_FALLBACK=1, and its shell never shows an error page for a cloud outage",
+        "the offline 'Can't reach Lines' page retries the app URL by itself on network online, every 10s while online, and on wake or unlock while still showing; it never retries from the data page itself"
       ],
       "architecturalRules": [
         "context menu hooked inside attachNavigationGuards so every window, including popups, gets it without a preload",
@@ -4292,7 +4296,8 @@
         "web/src/components/SyncSection.tsx",
         "web/src/components/workflow/UntrustedReview.tsx",
         "storage/src/index.ts",
-        "desktop/src/main.ts"
+        "desktop/src/main.ts",
+        "web/src/lib/connectRefusal.ts"
       ],
       "symbols": [
         "startHandshake",
@@ -4345,7 +4350,11 @@
         "trustSigner",
         "untrustSigner",
         "syncSigningInfo",
-        "UntrustedReviewModal"
+        "UntrustedReviewModal",
+        "refusalFor",
+        "clearRefusalFor",
+        "refusedReconnectDelay",
+        "clearE2eeRefusal"
       ],
       "tests": [
         "server/src/e2ee.test.ts",
@@ -4355,7 +4364,8 @@
         "server/src/sync.items.test.ts",
         "server/src/workflows.trust.test.ts",
         "server/src/relayEndToEnd.test.ts",
-        "server/src/sync.availability.test.ts"
+        "server/src/sync.availability.test.ts",
+        "server/src/connectRefusal.test.ts"
       ],
       "businessRules": [
         "every relayed owner channel must authenticate from a machine's first launch, enrolled device or not — there is no plaintext owner path; before enrolling, the only thing a channel can do is enrol",
@@ -4378,7 +4388,8 @@
         "this machine's sync-signing fingerprint and the account's trusted machines are owner-only (hello.syncSigning, the syncSigning broadcast); a guest's view has neither",
         "an enrollment code handed to a page travels in the URL fragment, never a query string, and is consumed and stripped on read — a query string reaches the server, which is the party the code exists to exclude; the query form is still accepted on read only because an older desktop build's QR emitted it",
         "a machine's own desktop window is handed a live code (appUrlForOwnWindow) rather than asked to type one: the shell and the bridge are already the same trust domain, so hand-enrolling the machine against itself was a step with no security value",
-        "the connect-time EnrollGate states the exchange as numbered steps, because step one happens on a different device from the one the user is looking at, and it is not a dead end — it also lists the account's other machines and offers pairing a new one"
+        "the connect-time EnrollGate states the exchange as numbered steps, because step one happens on a different device from the one the user is looking at, and it is not a dead end — it also lists the account's other machines and offers pairing a new one",
+        "a connect refusal belongs to the machine that sent it: one machine's refusal never shows on another machine's connecting screen, and is cleared only for its own machine (enroll, join link, its hello); a secondary link refused for a reason waiting cannot fix backs off exponentially instead of re-dialling every 1.5s"
       ],
       "architecturalRules": [
         "attested.userId is a routing hint, not an authorization decision — this replaces the former rule that the relay is the auth edge",

@@ -233,6 +233,8 @@ pushed at all.
   caught the guest-handover deadlock described below
 - `server/src/sync.availability.test.ts` — unsigned blob refused by default, accepted under
   `LINES_E2EE_STRICT=0`, forged refused either way
+- `server/src/connectRefusal.test.ts` — a refusal for one machine is invisible to another, and
+  clearing is per machine; the refused-link backoff doubles to a five-minute cap.
 
 ## Business rules
 
@@ -322,6 +324,15 @@ pushed at all.
   (`hello.syncSigning`); a guest's view has neither. The key is minted the first time the machine
   signs or checks a synced item, after the `hello` that would have shown it, so that sync pass
   announces it once with a `syncSigning` broadcast.
+- A connect refusal **belongs to the machine that sent it**. The window links to several machines at
+  once, so a secondary machine's refusal (a guest without a grant, say) must never render on another
+  machine's connecting screen, where it would put an enrol form in front of a machine this browser
+  already trusts. A refusal is cleared only for its own machine: by enrolling it, adopting its join
+  link, or its `hello`.
+- A secondary link refused for a reason that waiting cannot fix backs off exponentially, from the
+  ordinary reconnect delay up to five minutes, instead of re-dialling every 1.5s. The primary keeps
+  its pace because the user acts on its refusal screen. Enrolling or adopting a join link re-dials
+  immediately.
 
 ## Architectural rules
 

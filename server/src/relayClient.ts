@@ -105,6 +105,18 @@ const SUPERSEDE_CAP_MS = Number(process.env.LINES_SUPERSEDE_CAP_MS ?? 300_000);
  * late, the delta is enormous, and the stale socket is replaced immediately.
  */
 const RELAY_IDLE_MS = Number(process.env.LINES_RELAY_IDLE_MS ?? 60_000);
+/**
+ * How long a dial may take before it is abandoned and retried.
+ *
+ * The idle watchdog above only guards an OPEN socket, so before this a dial that
+ * never completed — a network switch mid-handshake, DNS on the new interface not
+ * answering — sat in CONNECTING forever and the bridge never re-dialled. Well above
+ * the slowest real open seen in the logs (~6.4s). Env-tunable for tests.
+ */
+const RELAY_DIAL_TIMEOUT_MS = Number(process.env.LINES_RELAY_DIAL_TIMEOUT_MS ?? 15_000);
+/** Grace past the handshake timeout before the CONNECTING watchdog terminates the
+ *  socket itself — `handshakeTimeout` may not cover the DNS lookup phase. */
+const RELAY_DIAL_WATCHDOG_GRACE_MS = 5_000;
 /** Derived, so compressing the timeout in a test compresses the check with it. */
 const RELAY_HEALTH_MS = Math.max(1_000, Math.min(15_000, Math.floor(RELAY_IDLE_MS / 4)));
 
@@ -333,13 +345,31 @@ export class RelayClient {
     // The relay still reads the old `secret` query parameter, for bridges released
     // before this — so it has to be deployed before a bridge that sends only this.
     const url = `${this.url}/agent?device=${encodeURIComponent(this.deviceId)}`;
-    const ws = new WebSocket(url, { headers: { [RELAY_SECRET_HEADER]: this.secret } });
+    const ws = new WebSocket(url, {
+      headers: { [RELAY_SECRET_HEADER]: this.secret },
+      handshakeTimeout: RELAY_DIAL_TIMEOUT_MS,
+    });
     this.ws = ws;
     this.dials++;
     this.dialedAt = Date.now();
     console.log(`[relay] dial #${this.dials} ${this.url}/agent`);
+    // Backstop for a dial that neither opens nor errors. Terminating it emits
+    // `close`, whose handler re-dials through the single-flight retry().
+    let dialWatchdog: NodeJS.Timeout | null = setTimeout(() => {
+      dialWatchdog = null;
+      if (this.ws === ws && ws.readyState === WebSocket.CONNECTING) {
+        console.warn(`[relay] dial #${this.dials} stuck connecting — terminating`);
+        ws.terminate();
+      }
+    }, RELAY_DIAL_TIMEOUT_MS + RELAY_DIAL_WATCHDOG_GRACE_MS);
+    dialWatchdog.unref();
+    const clearDialWatchdog = () => {
+      if (dialWatchdog) clearTimeout(dialWatchdog);
+      dialWatchdog = null;
+    };
 
     ws.on('open', () => {
+      clearDialWatchdog();
       // Deliberately no `attempt = 0` here: see RELAY_STABLE_MS. The close handler
       // resets it, and only for a socket that lasted.
       this.openedAt = Date.now();
@@ -367,6 +397,7 @@ export class RelayClient {
     });
 
     ws.on('close', (code: number, reason: Buffer) => {
+      clearDialWatchdog();
       // Only the current socket's watchdog: a superseded predecessor closing late
       // must not clear the timer belonging to the connection that replaced it.
       if (this.ws === ws) {

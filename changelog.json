@@ -1,6 +1,16 @@
 {
   "web": [
     {
+      "version": "0.1.41",
+      "date": "2026-11-16",
+      "items": [
+        {
+          "text": "Lines no longer asks you to enroll your own machine just because a different machine shared with you turned the connection down.",
+          "image": "web-0.1.41-own-machine-refusal.png"
+        }
+      ]
+    },
+    {
       "version": "0.1.40",
       "date": "2026-11-16",
       "items": [
@@ -427,6 +437,10 @@
     {
       "text": "Goals are checked after every turn: Stop always halts them, and a failed turn, a failed check or an app restart pauses them until you resume.",
       "image": "desktop-next-goals.png"
+    },
+    {
+      "text": "After a network change or waking from sleep, Lines reconnects by itself, and the “Can’t reach Lines” page retries on its own once you are back online.",
+      "image": "desktop-next-network-reconnect.png"
     }
   ]
 }

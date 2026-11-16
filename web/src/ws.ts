@@ -15,6 +15,7 @@ import { refreshDevices } from './lib/devices';
 import { cryptoUnavailable, deviceIdentity, guestGrantTokens, pinKey, pinnedKey } from './lib/e2ee';
 import { WAKE_PROBE_TIMEOUT_MS, probeExpired, shouldReviveIdle, wakeAction, wakeDebounced } from './lib/wake';
 import { plaintextFrameAllowed } from './lib/plaintextFrames';
+import { refusedReconnectDelay } from './lib/connectRefusal';
 import { bridgeTokenProtocols } from './lib/localShell';
 import {
   diag,
@@ -220,6 +221,12 @@ interface MachineLink {
   connectingSince: number | null;
   /** Connect attempts since this link last received a `hello`. */
   attempts: number;
+  /**
+   * Consecutive refusals of a secondary link for a reason waiting cannot fix (a
+   * guest without a grant, say). Non-zero switches its re-dial to an exponential
+   * backoff; cleared by a `hello` and by {@link reconnectMachine}.
+   */
+  refusals: number;
   /** When the current socket was created, for open/close/hello timings. */
   dialedAt: number;
   openedAt: number | null;
@@ -369,6 +376,7 @@ function linkFor(deviceId: string): MachineLink {
       enrollWaiter: null,
       connectingSince: null,
       attempts: 0,
+      refusals: 0,
       dialedAt: 0,
       openedAt: null,
       lastClose: null,
@@ -477,6 +485,9 @@ export function reconnectNow() {
  */
 export function reconnectMachine(deviceId: string) {
   const link = linkFor(deviceId);
+  // Somebody just changed something (enrolled, adopted a join link): the
+  // refusal backoff was for waiting, and this is not waiting.
+  link.refusals = 0;
   if (link.retryTimer) clearTimeout(link.retryTimer);
   link.retryTimer = null;
   if (link.socket && link.socket.readyState !== WebSocket.CLOSED) link.socket.close();
@@ -930,7 +941,7 @@ async function runEnrollment(deviceId: string, code: string): Promise<{ error?: 
       }
       pinKey(deviceId, msg.bridgeKey);
       needsEnrollment.delete(deviceId);
-      useStore.getState().setE2eeRefusal(null);
+      useStore.getState().clearE2eeRefusal(deviceId);
       resolve({});
       // This link, by name — not the primary. See reconnectMachine.
       reconnectMachine(deviceId);
@@ -1117,13 +1128,19 @@ async function openSocket(link: MachineLink) {
       // so re-read the list: if it is gone, the gate shows the pairing screen
       // instead of retrying a machine that will now be refused forever.
       if (link.deviceId) refreshDevices();
-      link.retryTimer = setTimeout(() => void openSocket(link), UNAUTHORIZED_RETRY_DELAY_MS);
+      link.retryTimer = setTimeout(
+        () => void openSocket(link),
+        link.refusals ? Math.max(UNAUTHORIZED_RETRY_DELAY_MS, refusedReconnectDelay(link.refusals)) : UNAUTHORIZED_RETRY_DELAY_MS,
+      );
       return;
     }
     useStore
       .getState()
       .setConnectionStatus(navigator.onLine ? 'reconnecting' : 'offline', link.deviceId);
-    link.retryTimer = setTimeout(() => void openSocket(link), RECONNECT_DELAY_MS);
+    link.retryTimer = setTimeout(
+      () => void openSocket(link),
+      link.refusals ? refusedReconnectDelay(link.refusals) : RECONNECT_DELAY_MS,
+    );
   };
 
   socket.onerror = () => socket.close();
@@ -1203,7 +1220,11 @@ function handleServerMessage(link: MachineLink, msg: ServerMessage | RelayContro
       bridge: msg.bridge?.version ?? null,
     });
     link.attempts = 0;
+    link.refusals = 0;
     link.greeted = true;
+    // A refusal that later succeeds (revoked, then re-enrolled elsewhere) must
+    // not keep its refusal on screen.
+    useStore.getState().clearE2eeRefusal(link.deviceId);
     // `access` is on a guest's hello only; the owner's carries none.
     link.guest = !!msg.access;
     uploadStallIfAny(link.deviceId);
@@ -1320,8 +1341,13 @@ async function handleE2eeFrame(
         // A refusal for want of a key is recoverable *here*, from the connecting
         // gate — every other refusal is not, so only this one arms the quiet
         // reconnect that makes enrollment possible.
-        if (/end-to-end encrypted channel/.test(msg.reason)) needsEnrollment.add(link.deviceId);
-        useStore.getState().setE2eeRefusal(msg.reason);
+        const enrollable = /end-to-end encrypted channel/.test(msg.reason);
+        if (enrollable) needsEnrollment.add(link.deviceId);
+        // A secondary link refused for a reason waiting cannot fix backs off
+        // instead of re-dialling every 1.5s forever. The primary sits on the
+        // refusal screen, where the user acts, so it keeps its pace.
+        else if (link.deviceId !== primaryDeviceId) link.refusals++;
+        useStore.getState().setE2eeRefusal(link.deviceId, msg.reason);
       }
       return;
     }

@@ -1,8 +1,13 @@
 import assert from 'node:assert/strict';
 import type { IncomingMessage } from 'node:http';
+import { createServer, type Server, type Socket } from 'node:net';
 import { after, test } from 'node:test';
 import { WebSocketServer } from 'ws';
-import { RelayClient } from './relayClient.ts';
+
+// Compressed so the hung-dial case below finishes quickly. Set before the import:
+// the constant is read at module load (same pattern as relayClient.supersede.test.ts).
+process.env.LINES_RELAY_DIAL_TIMEOUT_MS = '300';
+const { RelayClient } = await import('./relayClient.ts');
 
 /**
  * How the bridge presents its device secret when it dials the relay.
@@ -15,12 +20,16 @@ import { RelayClient } from './relayClient.ts';
 
 const SECRET = 'SECRET-canary-never-in-a-url';
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-const clients: RelayClient[] = [];
+const clients: InstanceType<typeof RelayClient>[] = [];
 const servers: WebSocketServer[] = [];
+const tcpServers: Server[] = [];
+const tcpSockets: Socket[] = [];
 
 after(async () => {
   for (const c of clients) c.dispose();
   for (const s of servers) s.close();
+  for (const sock of tcpSockets) sock.destroy();
+  for (const s of tcpServers) s.close();
   await sleep(50);
 });
 
@@ -62,4 +71,35 @@ test('the device secret rides a header, and neither the URL nor the log carries 
   await sleep(100);
   assert.ok(printed.some((line) => line.includes('/agent')), 'the dial was logged at all');
   assert.equal(printed.some((line) => line.includes(SECRET)), false, 'the secret is never printed');
+});
+
+test('a dial the relay never answers is abandoned and dialled again', async (t) => {
+  const original = { log: console.log, warn: console.warn };
+  console.log = () => {};
+  console.warn = () => {};
+  t.after(() => Object.assign(console, original));
+
+  // Accepts TCP and then says nothing: the upgrade request is never answered, which
+  // is what a dial caught mid network-switch looks like from the bridge. Before the
+  // dial timeout this socket sat in CONNECTING forever and nothing re-dialled.
+  let connections = 0;
+  const server = createServer((sock) => {
+    connections++;
+    tcpSockets.push(sock);
+    sock.on('error', () => {});
+  });
+  tcpServers.push(server);
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as { port: number };
+
+  const client = new RelayClient(`ws://127.0.0.1:${port}`, 'dev-device', SECRET, {
+    onChannel: () => {},
+    onToken: () => {},
+  });
+  clients.push(client);
+
+  const deadline = Date.now() + 10_000;
+  while (connections < 2 && Date.now() < deadline) await sleep(20);
+  assert.ok(connections >= 2, `expected a re-dial after the hung one, saw ${connections} connection(s)`);
+  assert.equal(client.connected, false);
 });

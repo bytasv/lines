@@ -36,6 +36,7 @@ import {
 import { enrollWithCode, linkDiagnostics, reconnectMachine, type LinkDiagnostics } from '../ws';
 import { diag, diagReport, markDiagSent } from '../lib/diag';
 import { unlinkedMachineHealth } from '../lib/machineHealth';
+import { refusalFor } from '../lib/connectRefusal';
 import { useSplash } from '../lib/splash';
 import { useStore } from '../store';
 import { MachineDot } from './MachineDot';
@@ -94,7 +95,8 @@ export function ConnectingMachine({
   // The machine answered, and refused this browser. Distinct from every other
   // state on this screen: nothing is asleep, nothing is slow, and waiting will
   // never resolve it — only enrolling a key will.
-  const refusal = useStore((s) => s.e2eeRefusal);
+  // Only this machine's: another link's refusal is about another machine.
+  const refusal = useStore((s) => refusalFor(s.e2eeRefusal, deviceId));
   const [slow, setSlow] = useState(false);
   const [busy, setBusy] = useState(false);
 
@@ -609,7 +611,7 @@ function GuestLinkGate({
       setError(`That link names a different key for ${name} than the one this browser already trusts.`);
       return;
     }
-    useStore.getState().setE2eeRefusal(null);
+    useStore.getState().clearE2eeRefusal(deviceId);
     reconnectMachine(deviceId);
   };
 
