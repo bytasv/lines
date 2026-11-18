@@ -1,6 +1,16 @@
 {
   "web": [
     {
+      "version": "0.1.43",
+      "date": "2026-11-18",
+      "items": [
+        {
+          "text": "When a workflow step you haven't reached yet is edited in your library, a running session marks it with an update icon: review the changes and choose Update to run the new version, or keep the original.",
+          "image": "web-0.1.43-step-update.png"
+        }
+      ]
+    },
+    {
       "version": "0.1.42",
       "date": "2026-11-18",
       "items": [
@@ -452,6 +462,10 @@
       "text": "After a network change or waking from sleep, Lines reconnects by itself, and the “Can’t reach Lines” page retries on its own once you are back online.",
       "image": "desktop-next-network-reconnect.png"
     },
-    "With Code Mode turned on, sessions start Claude Code with its experimental Code Mode; an older Claude Code keeps working without it."
+    "With Code Mode turned on, sessions start Claude Code with its experimental Code Mode; an older Claude Code keeps working without it.",
+    {
+      "text": "A running workflow can take a newer version of a step it hasn't started yet, but only when you choose Update; steps already running or finished keep what they ran.",
+      "image": "desktop-next-step-update.png"
+    }
   ]
 }

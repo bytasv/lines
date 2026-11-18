@@ -137,6 +137,21 @@ passes it to `StepCard` for the selected step (the outline row shows only an upd
 on "Update all", calls `updateAllToLatest`, which re-pins every ref step whose head version is
 newer than its pinned version in one pass.
 
+### Running-session step updates
+
+A session attached to a workflow runs a frozen snapshot (see
+[workflow-step-lifecycle](workflow-step-lifecycle.md)). `pendingStepUpdates` in `shared` computes,
+per still-pending step, the newer content the library now holds: a ref takes the higher of its
+live row's pin and the step's head; an inline step takes its live row's content when that differs.
+Steps are paired by `stepId`, or, for inline steps without one, by position and only when the
+row's length still matches the snapshot. `WorkflowStepper` shows an update badge on those steps
+and opens the same `UpdatePopover` / `FieldDiffList` pair as the stale-pin warning. A ref version
+missing on the client is requested via `stepVersions` before the diff shows. The client sends
+`updateWorkflowSteps` with the candidate it displayed; `WorkflowEngine.updatePendingSteps`
+recomputes the candidate and replaces the snapshot step only if the two match, and refuses an
+entry whose version is unknown or held, or that adds a validation issue or an unfenced provider
+switch against its neighbours.
+
 ### Version history / restore
 
 Opening either the `VersionHistoryPopover` or `RestoreHistoryPopover` fires a `stepVersions`

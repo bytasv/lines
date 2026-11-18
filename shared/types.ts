@@ -2615,6 +2615,12 @@ export const MESSAGE_AUTHZ: Record<ClientMessage['type'], MessageAuthz> = {
   // Per-run model/effort for a workflow's pending steps: the same choice as
   // setModel/setReasoningEffort, made ahead of the step starting.
   setWorkflowStepOverrides: { needs: 'session', cap: 'setModel' },
+  // Taking a pending step's newer library content changes what that step
+  // prompts and which permission mode it runs in — more than a model choice —
+  // so it rides the cap that already lets a viewer run the workflow's steps
+  // (approve starts the next step on whatever content it holds). The bridge
+  // re-derives the content itself; the message only names which update.
+  updateWorkflowSteps: { needs: 'session', cap: 'manageWorkflow' },
   // Answering a routing suggestion changes the model and effort, so it rides the
   // same capability as setModel; pausing routing is the same choice made ahead.
   routingChoice: { needs: 'session', cap: 'setModel' },
@@ -2899,6 +2905,15 @@ export type ClientMessage =
       type: 'setWorkflowStepOverrides';
       sessionId: string;
       stepOverrides: (WorkflowStepOverride | null)[];
+    }
+  /** Take the library's newer content for pending steps of the run's frozen
+   *  workflow (see `pendingStepUpdates`). `expected` is the candidate the client
+   *  saw; the bridge recomputes its own and applies an entry only when the two
+   *  match, so a stale tab or a newer edit drops that entry. */
+  | {
+      type: 'updateWorkflowSteps';
+      sessionId: string;
+      updates: { stepIndex: number; expected: WorkflowStep }[];
     }
   | { type: 'setPermissionMode'; sessionId: string; mode: PermissionMode }
   /** Ask-mode routing answer for the held turn: `accept` switches to the
@@ -4934,6 +4949,13 @@ export * from './e2ee.ts';
  * cycle-sensitive block below: `./changelog.ts` imports nothing at all.
  */
 export * from './changelog.ts';
+
+/**
+ * Newer content for a running session's pending workflow steps, shared by the
+ * stepper that offers it and the bridge that applies it. Safe above the
+ * cycle-sensitive block below: `./stepUpdates.ts` imports only types from here.
+ */
+export * from './stepUpdates.ts';
 
 /**
  * The estimator that stands in for a provider-reported cost, re-exported beside

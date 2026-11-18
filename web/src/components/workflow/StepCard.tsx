@@ -29,6 +29,7 @@ import {
   IconTrash,
 } from '@tabler/icons-react';
 import type { ModelOption, StepContent, StepDef } from '@lines/shared';
+import { changedStepFields, STEP_CONTENT_FIELDS } from '@lines/shared';
 import type { DraftStep, StepErrors } from './useWorkflowDraft';
 import { permissionModeLabel } from '../../lib/permissionModes';
 import { PromptEditor } from './PromptEditor';
@@ -38,7 +39,8 @@ import styles from './workflow.module.css';
 
 const cn = (...xs: (string | false | undefined)[]) => xs.filter(Boolean).join(' ');
 
-const FIELD_LABELS: Record<keyof StepContent, string> = {
+// Keyed on the shared field list, so a field added there needs a label here.
+const FIELD_LABELS: Record<(typeof STEP_CONTENT_FIELDS)[number], string> = {
   name: 'Name',
   promptTemplate: 'Prompt',
   model: 'Model',
@@ -62,11 +64,6 @@ function fieldText<K extends keyof StepContent>(k: K, v: StepContent[K]): string
   return typeof v === 'object' ? JSON.stringify(v) : String(v);
 }
 
-function changedFields(a: StepContent, b: StepContent): (keyof StepContent)[] {
-  return (Object.keys(FIELD_LABELS) as (keyof StepContent)[]).filter(
-    (k) => fieldText(k, a[k]) !== fieldText(k, b[k]),
-  );
-}
 
 /** Compact relative time ("3d ago"); falls back to empty when no timestamp. */
 export function relTime(ms?: number): string {
@@ -82,7 +79,7 @@ export function relTime(ms?: number): string {
 
 /** Per-field diff of two step contents (red − / green +), or an empty-state note. */
 export function FieldDiffList({ from, to }: { from: StepContent; to: StepContent }) {
-  const fields = changedFields(from, to);
+  const fields = changedStepFields(from, to);
   if (fields.length === 0) return <Text size="xs" c="dimmed">No field changes.</Text>;
   return (
     <ScrollArea.Autosize mah={280} type="auto">
@@ -99,28 +96,62 @@ export function FieldDiffList({ from, to }: { from: StepContent; to: StepContent
   );
 }
 
-/** The diff a pinned step would take on updating, behind whatever `children` is. */
-function UpdatePopover({
-  pinned,
-  head,
+/**
+ * The diff a step would take on updating to newer content, behind whatever
+ * `children` is. `to` undefined = the newer content is not on this client yet
+ * (`onOpen` is where to fetch it). Uncontrolled unless `opened` is given.
+ */
+export function UpdatePopover({
+  title,
+  from,
+  to,
+  updateLabel,
   onUpdate,
+  onOpen,
+  opened,
+  onChange,
+  secondary,
   children,
 }: {
-  pinned: StepContent;
-  head: StepDef;
+  title: ReactNode;
+  from: StepContent | undefined;
+  to: StepContent | undefined;
+  updateLabel: string;
   onUpdate: () => void;
+  onOpen?: () => void;
+  opened?: boolean;
+  onChange?: (opened: boolean) => void;
+  /** Extra actions beside the update button (e.g. "Keep original"). */
+  secondary?: ReactNode;
   children: ReactNode;
 }) {
   return (
-    <Popover width={360} position="bottom-end" withArrow shadow="md">
+    <Popover
+      width={360}
+      position="bottom-end"
+      withArrow
+      shadow="md"
+      opened={opened}
+      onChange={onChange}
+      onOpen={onOpen}
+    >
       <Popover.Target>{children}</Popover.Target>
       <Popover.Dropdown>
         <Stack gap={10}>
           <Text size="xs" fw={600}>
-            {head.ownerName ?? 'The owner'} published v{head.version}
+            {title}
           </Text>
-          <FieldDiffList from={pinned} to={head} />
-          <Button size="xs" onClick={onUpdate}>Update to v{head.version}</Button>
+          {from && to ? (
+            <FieldDiffList from={from} to={to} />
+          ) : (
+            <Text size="xs" c="dimmed">Loading the change…</Text>
+          )}
+          <Group gap="xs" justify="flex-end">
+            {secondary}
+            <Button size="xs" onClick={onUpdate} disabled={!from || !to}>
+              {updateLabel}
+            </Button>
+          </Group>
         </Stack>
       </Popover.Dropdown>
     </Popover>
@@ -328,7 +359,13 @@ export function StepCard({
     ));
 
   const updateButton = updateDef && (
-    <UpdatePopover pinned={step} head={updateDef} onUpdate={onUpdateToLatest}>
+    <UpdatePopover
+      title={`${updateDef.ownerName ?? 'The owner'} published v${updateDef.version}`}
+      from={step}
+      to={updateDef}
+      updateLabel={`Update to v${updateDef.version}`}
+      onUpdate={onUpdateToLatest}
+    >
       <Button size="compact-xs" variant="light" color="yellow">
         Update to v{updateDef.version}
       </Button>

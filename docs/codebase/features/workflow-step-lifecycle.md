@@ -667,6 +667,13 @@ installed icon, no new package). No other new dependencies.
   stay refs in the snapshot, so a pinned version held back after attach is still refused before
   its step runs. A snapshot synced to another machine is held there until reviewed, so its steps
   do not run on that machine.
+- The one way a frozen snapshot takes newer content is opt-in and per step: a still-pending step
+  whose library content changed (a newer version of its ref, or an edited inline step) shows an
+  update badge, and only an explicit Update (or Update all) replaces that step's content. Inserted,
+  removed or reordered steps are never offered, so step count and order stay fixed. Running and
+  finished steps, an advance in flight, and a snapshot marked untrusted never take an update. The
+  server recomputes the candidate and applies an entry only if it matches what the client showed.
+  See [workflow-step-versioning](workflow-step-versioning.md).
 - The transcript renders only three workflow-marker events: `started`, a failure park
   (`waiting-approval` with `failed` or `missingOutputs`), and `workflow-done`. Every
   other event this engine emits (`waiting-approval` with neither flag, `approved`,

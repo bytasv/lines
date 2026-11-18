@@ -653,7 +653,8 @@
         "server/src/workflows.ownership.test.ts",
         "server/src/workflowCommands.ts",
         "storage/src/stepRows.ts",
-        "storage/prisma/schema.prisma"
+        "storage/prisma/schema.prisma",
+        "shared/stepUpdates.ts"
       ],
       "symbols": [
         "VersionHistoryPopover",
@@ -695,7 +696,11 @@
         "UntrustedBadge",
         "workflowReviewItems",
         "stepReviewItem",
-        "DraftWorkflow.heldMark"
+        "DraftWorkflow.heldMark",
+        "pendingStepUpdates",
+        "stepUpdateCandidate",
+        "matchLiveStep",
+        "WorkflowEngine.updatePendingSteps"
       ],
       "tests": [
         "server/src/workflows.ownership.test.ts",
@@ -719,7 +724,8 @@
         "loadFrom selects no step of the loaded workflow (the pane shows the workflow overview); a step opens only via explicit selection, one at a time",
         "own beats shared: an id/step present in both the own and shared maps is owned, editable, and never rendered under \"Shared by others\"; a StepRef.ownerId drifted from the bridge's own id is healed on re-pin/update and on WorkflowEngine.save(), plus once at boot",
         "every version of one step reports the same createdAt (the lineage's, not the version's); a content change or a publish-toggle-only save both keep it, and it only ever moves earlier, never later",
-        "contentOf is the single StepContent field list for loading, saving, publishing and duplicating steps in both the workflow editor and step library, so no field (reasoningEffort, routing) is dropped on any path"
+        "contentOf is the single StepContent field list for loading, saving, publishing and duplicating steps in both the workflow editor and step library, so no field (reasoningEffort, routing) is dropped on any path",
+        "a running session's pending step shows an update only when its ref has a newer version or an inline step's content changed; running, done, untrusted and about-to-start steps never show one, and an inline step without a stable id is matched by position only when the row's length is unchanged"
       ],
       "architecturalRules": [
         "immutable step versions are never deleted or edited, on disk or in storage — only the head list and published flag change",
@@ -784,7 +790,8 @@
         "web/src/lib/useStepResolver.ts",
         "web/src/lib/platform.ts",
         "shared/workflowValidation.ts",
-        "server/src/sessions.ended.test.ts"
+        "server/src/sessions.ended.test.ts",
+        "shared/stepUpdates.ts"
       ],
       "symbols": [
         "SessionManager.interrupt",
@@ -828,7 +835,9 @@
         "SessionManager.TurnResumedListener",
         "provesMainThreadTurn",
         "SessionManager.settleStoppedTurn",
-        "WorkflowState.iteratedStep"
+        "WorkflowState.iteratedStep",
+        "pendingStepUpdates",
+        "WorkflowEngine.updatePendingSteps"
       ],
       "tests": [
         "server/src/workflows.advance.test.ts",
@@ -888,7 +897,8 @@
         "a parked step re-opens to running when a main-thread event proves a turn is live on it that the bridge did not start (a background-task notification turn) and parks again on that turn's result; a pre-run failure, an in-flight advance, a Stop in progress and any bridge-started turn never re-open it",
         "a closed query is final: nothing it emits afterwards reaches the session, and a workflow advance holds prompts and queue flushes until it finishes",
         "a clean park (waiting-approval, no stepFailure) presents like done: green, non-pulsing 'step finished', actionable false — project tab shows a steady green dot only while recent and unseen (see session-and-project-ui), not in the machine 'needs you' count, sorted above done and below anything needing the user; the stored status stays waiting-approval and approval lives on the stepper; a failed park stays a red actionable error",
-        "WorkflowState.iteratedStep is set when iterateStep re-runs a clean park (free-text iterate, a queued/held follow-up drained into the step); never by a Retry of a failed turn or a background-task reopen; keyed by index so it self-invalidates once stepIndex moves on; its only effect is that later parks of that step do not alert"
+        "WorkflowState.iteratedStep is set when iterateStep re-runs a clean park (free-text iterate, a queued/held follow-up drained into the step); never by a Retry of a failed turn or a background-task reopen; keyed by index so it self-invalidates once stepIndex moves on; its only effect is that later parks of that step do not alert",
+        "a running session takes a library change to a pending step only by an explicit Update or Update all; the server re-derives the candidate and applies an entry only if it matches what the client displayed, and never changes step count or order"
       ],
       "architecturalRules": [
         "interrupt() stays intent-free — no caller may infer \"advance\" from \"stop\"",

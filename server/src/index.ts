@@ -1903,6 +1903,9 @@ async function handleMessageImpl(ctx: UserContext, ws: BrowserLink, msg: ClientM
     case 'setWorkflowStepOverrides':
       workflows.setStepOverrides(msg.sessionId, msg.stepOverrides);
       break;
+    case 'updateWorkflowSteps':
+      workflows.updatePendingSteps(msg.sessionId, msg.updates);
+      break;
     // The four workflow mutations and the version read below go through
     // workflowCommands.ts, which the session's own MCP tools also call — so the
     // two surfaces are the same code path rather than two that look alike.

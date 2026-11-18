@@ -24,12 +24,18 @@ import {
   isSessionActive,
   isSessionInterruptible,
   isStepRef,
+  isStepUpdatable,
+  matchLiveStep,
   providerForModel,
   providerSwitchNeedsFreshStart,
   resolveModelId,
   rootsForCwd,
+  sameWorkflowStep,
   sanitizeStepGoal,
   sanitizeStepOverrides,
+  stepUpdateCandidate,
+  validateWorkflow,
+  type WorkflowStep,
 } from '@lines/shared';
 import type { Store } from './store.ts';
 import type { SessionManager } from './sessions.ts';
@@ -1186,7 +1192,9 @@ export class WorkflowEngine {
    * still checks it on every run.
    */
   private snapshotOf(wf: WorkflowDef): WorkflowDef {
-    return { ...unmarked(wf), steps: [...wf.steps] };
+    // Each step copied, not just the array: an inline step object shared with
+    // the live row would carry an in-place edit of the row into this run.
+    return { ...unmarked(wf), steps: wf.steps.map((s) => ({ ...s })) };
   }
 
   /**
@@ -1277,6 +1285,84 @@ export class WorkflowEngine {
     state.stepOverrides = next.some(Boolean) ? next : undefined;
     if (!state.started) this.seedStep0(meta, wf);
     this.sessions.setStatus(sessionId, meta.status); // persist + broadcast
+  }
+
+  /**
+   * Take the library's newer content for pending steps of this run's frozen
+   * workflow — the opt-in side of `snapshotOf`. Each entry names a step and the
+   * candidate the client saw; the candidate is recomputed here from the live
+   * row and the step heads, and an entry applies only when the two match, so
+   * client content is never taken and a stale tab's entry is dropped. Entries
+   * are checked one by one; a refused one does not stop the others. Step count
+   * and order never change. One persist + broadcast for the batch.
+   */
+  updatePendingSteps(sessionId: string, updates: readonly { stepIndex: number; expected: WorkflowStep }[]) {
+    const meta = this.sessions.get(sessionId);
+    const state = meta?.workflow;
+    if (!meta || !state?.def || state.def.untrusted || !Array.isArray(updates)) return;
+    const live = this.resolve(state.workflowId);
+    let changed = false;
+    for (const u of updates) {
+      const def: WorkflowDef | undefined = state.def;
+      if (!def) break;
+      const i = u?.stepIndex;
+      if (!Number.isInteger(i) || !def.steps[i] || !u.expected || typeof u.expected !== 'object') continue;
+      if (!isStepUpdatable(state, i)) continue;
+      const candidate = stepUpdateCandidate(def.steps[i], live && matchLiveStep(def, live, i), (ownerId, stepId) =>
+        this.sharedSteps.get(`${ownerId}/${stepId}`) ?? this.steps.get(stepId),
+      );
+      if (!candidate || !sameWorkflowStep(candidate, u.expected)) continue;
+      const steps = def.steps.map((s, j) => (j === i ? candidate : s));
+      const refusal = this.stepUpdateRefusal(def, steps, i);
+      if (refusal) {
+        console.warn(`[workflow ${def.id}] step ${i + 1} update refused: ${refusal}`);
+        continue;
+      }
+      const next: WorkflowDef = { ...def, steps };
+      state.def = next;
+      changed = true;
+      if (i === 0 && !state.started) this.seedStep0(meta, next);
+    }
+    if (changed) this.sessions.setStatus(sessionId, meta.status); // persist + broadcast
+  }
+
+  /**
+   * Why `steps` (the frozen `def` with step `i` replaced) may not run, or
+   * undefined. The new content must resolve to a version this machine holds and
+   * does not hold back, and the step must not bring a validation issue or a
+   * provider crossing the run did not already have.
+   */
+  private stepUpdateRefusal(def: WorkflowDef, steps: WorkflowStep[], i: number): string | undefined {
+    const step = steps[i]!;
+    if (isStepRef(step)) {
+      const pinned = this.stepVersions.get(stepKey(step.ownerId, step.stepId, step.version));
+      if (!pinned) return `v${step.version} is not available on this machine`;
+      if (isHeld(pinned)) return `v${step.version} has not been verified on this machine`;
+    }
+    const issues = (list: WorkflowStep[]) =>
+      validateWorkflow(
+        def.name,
+        list.map((s) => ({ content: this.stepContent(s), isRef: isStepRef(s) })),
+        { strictModel: true },
+      ).map((x) => `${x.stepIndex ?? ''}:${x.field}:${x.message}`);
+    const before = new Set(issues(def.steps));
+    const added = issues(steps).filter((x) => !before.has(x));
+    if (added.length) return added.join('; ');
+    // Pair (j-1, j) crosses providers without step j starting fresh.
+    const crossing = (list: WorkflowStep[], j: number): boolean => {
+      const prev = list[j - 1] && this.stepContent(list[j - 1]!);
+      const cur = list[j] && this.stepContent(list[j]!);
+      return (
+        !!prev &&
+        !!cur &&
+        !cur.freshStart &&
+        providerSwitchNeedsFreshStart(providerForModel(prev.model), providerForModel(cur.model))
+      );
+    };
+    for (const j of [i, i + 1]) {
+      if (crossing(steps, j) && !crossing(def.steps, j)) return 'it would switch provider without a fresh start';
+    }
+    return undefined;
   }
 
   /**

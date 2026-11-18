@@ -1,4 +1,4 @@
-import { Fragment, useState } from 'react';
+import { Fragment, useMemo, useState } from 'react';
 import {
   ActionIcon,
   Box,
@@ -22,12 +22,15 @@ import {
   IconHandStop,
   IconPlayerPlay,
   IconPlayerTrackNext,
+  IconRefresh,
   IconTarget,
 } from '@tabler/icons-react';
 import type {
   ModelOption,
   SessionMeta,
   StepContent,
+  StepDef,
+  StepHead,
   WorkflowDef,
   WorkflowStep,
   WorkflowStepOverride,
@@ -38,6 +41,8 @@ import {
   hasEstimatedSpend,
   isSessionActive,
   isSessionInterruptible,
+  isStepRef,
+  pendingStepUpdates,
   providerForModel,
 } from '@lines/shared';
 import { useCan } from '../lib/can';
@@ -50,6 +55,7 @@ import { send } from '../ws';
 import { revealWorkflowStep } from '../lib/workflowReveal';
 import { ConfirmModal } from './ConfirmModal';
 import { WorkflowRunModal } from './workflow/WorkflowRunModal';
+import { UpdatePopover } from './workflow/StepCard';
 import { GoalModal } from './GoalModal';
 import { goalStatusLabel } from './GoalChip';
 import { crossesProvider, effortLabel, gateLabel, modelLabel, startLabel } from './workflow/StepSettings';
@@ -209,6 +215,131 @@ function StepIcon({
   );
 }
 
+/**
+ * Newer library content for this run's pending steps (see `pendingStepUpdates`),
+ * for a viewer who may drive the workflow. Only a session riding a frozen
+ * snapshot has any: a legacy one already follows the live row.
+ */
+function useStepUpdates(session: SessionMeta, workflow: WorkflowDef) {
+  const state = session.workflow!;
+  const { findWorkflow } = useStepResolver();
+  const canManage = useCan('manageWorkflow');
+  const libSteps = useStore((s) => s.steps);
+  const sharedSteps = useStore((s) => s.sharedSteps);
+  const pinnedSteps = useStore((s) => s.pinnedSteps);
+  const fetched = useStore((s) => s.stepVersions);
+
+  // Latest version per (owner, id) — the head a ref could move to.
+  const heads = useMemo(() => {
+    const m = new Map<string, StepDef>();
+    for (const s of [...libSteps, ...sharedSteps]) {
+      const key = `${s.ownerId}/${s.id}`;
+      if ((m.get(key)?.version ?? -1) < s.version) m.set(key, s);
+    }
+    return m;
+  }, [libSteps, sharedSteps]);
+
+  // Exact immutable versions known here, for a diff of two specific versions —
+  // unlike `useStepResolver`'s lookup, which falls back to the latest.
+  const versions = useMemo(() => {
+    const m = new Map<string, StepDef>();
+    for (const s of [...pinnedSteps, ...libSteps, ...sharedSteps, ...Object.values(fetched).flat()]) {
+      m.set(`${s.ownerId}/${s.id}/${s.version}`, s);
+    }
+    return m;
+  }, [pinnedSteps, libSteps, sharedSteps, fetched]);
+
+  const live = state.def ? findWorkflow(state.workflowId) : undefined;
+  const updates = useMemo(() => {
+    if (!canManage || !state.def) return workflow.steps.map(() => null);
+    // Same fallback as the bridge's: an own step whose ref drifted to another owner id.
+    const head = (ownerId: string, stepId: string): StepHead | undefined =>
+      heads.get(`${ownerId}/${stepId}`) ?? libSteps.find((s) => s.id === stepId);
+    return pendingStepUpdates(state, live, head);
+  }, [canManage, state, live, heads, libSteps, workflow.steps]);
+
+  const resolveExact = (step: WorkflowStep): StepContent | undefined =>
+    isStepRef(step) ? versions.get(`${step.ownerId}/${step.stepId}/${step.version}`) : step;
+
+  return {
+    updates,
+    resolveExact,
+    /** Ask the bridge for a ref's history when a version the diff needs is missing here. */
+    fetchVersions: (snap: WorkflowStep) => {
+      const i = workflow.steps.indexOf(snap);
+      const next = updates[i];
+      if (!isStepRef(snap) || !next || (resolveExact(snap) && resolveExact(next))) return;
+      send({ type: 'stepVersions', ownerId: snap.ownerId, stepId: snap.stepId });
+    },
+    apply: (indices: number[]) => {
+      const entries = indices.flatMap((stepIndex) => {
+        const expected = updates[stepIndex];
+        return expected ? [{ stepIndex, expected }] : [];
+      });
+      if (entries.length) send({ type: 'updateWorkflowSteps', sessionId: session.id, updates: entries });
+    },
+  };
+}
+
+/** "Update available" on a pending step, opening the diff it would take. */
+function StepUpdateBadge({
+  index,
+  snap,
+  candidate,
+  resolve,
+  opened,
+  onChange,
+  onUpdate,
+  disabled,
+}: {
+  index: number;
+  snap: WorkflowStep;
+  candidate: WorkflowStep;
+  resolve: (step: WorkflowStep) => StepContent | undefined;
+  opened: boolean;
+  onChange: (opened: boolean) => void;
+  onUpdate: () => void;
+  disabled: boolean;
+}) {
+  const title =
+    isStepRef(snap) && isStepRef(candidate)
+      ? `Step ${index + 1}: v${snap.version} → v${candidate.version}`
+      : `Step ${index + 1} was edited in the library`;
+  return (
+    <UpdatePopover
+      title={title}
+      from={resolve(snap)}
+      to={resolve(candidate)}
+      updateLabel="Update"
+      onUpdate={onUpdate}
+      opened={opened}
+      onChange={onChange}
+      secondary={
+        <Button size="xs" variant="default" onClick={() => onChange(false)}>
+          Keep original
+        </Button>
+      }
+    >
+      <Tooltip label="Update available" withArrow fz="xs" disabled={opened}>
+        <ActionIcon
+          variant="subtle"
+          color="yellow"
+          size={16}
+          aria-label={`Update available for step ${index + 1}`}
+          style={{ flexShrink: 0 }}
+          disabled={disabled}
+          onClick={(e) => {
+            e.stopPropagation();
+            onChange(!opened);
+          }}
+        >
+          <IconRefresh size={12} />
+        </ActionIcon>
+      </Tooltip>
+    </UpdatePopover>
+  );
+}
+
 export function WorkflowStepper({
   session,
   workflow,
@@ -234,6 +365,11 @@ export function WorkflowStepper({
   const canSetModel = useCan('setModel');
   const [tuneOpen, setTuneOpen] = useState(false);
   const tunable = canSetModel && state.stepStatuses.some((st) => st === 'pending');
+
+  const stepUpdates = useStepUpdates(session, workflow);
+  const updateCount = stepUpdates.updates.filter(Boolean).length;
+  /** Step index whose update popover is open. */
+  const [updateOpen, setUpdateOpen] = useState<number | null>(null);
 
   const currentStatus = state.stepStatuses[state.stepIndex];
   const waiting = currentStatus === 'waiting-approval';
@@ -397,6 +533,7 @@ export function WorkflowStepper({
               <Stack gap={4} style={{ flex: 1, minWidth: 0 }}>
                 {/* Hover only: a phone has none, and its row is the current step,
                     whose settings the composer already shows. */}
+                <Group gap={4} wrap="nowrap" style={{ minWidth: 0 }}>
                 <HoverCard
                   disabled={isPhone}
                   openDelay={350}
@@ -413,6 +550,7 @@ export function WorkflowStepper({
                       fw={current ? 600 : 500}
                       c={status === 'pending' && !current ? 'dimmed' : undefined}
                       truncate
+                      style={{ minWidth: 0 }}
                     >
                       {nameOf(step)}
                     </Text>
@@ -428,6 +566,25 @@ export function WorkflowStepper({
                     />
                   </HoverCard.Dropdown>
                 </HoverCard>
+                  {stepUpdates.updates[i] && (
+                    <StepUpdateBadge
+                      index={i}
+                      snap={step}
+                      candidate={stepUpdates.updates[i]!}
+                      resolve={stepUpdates.resolveExact}
+                      opened={updateOpen === i}
+                      onChange={(o) => {
+                        if (o) stepUpdates.fetchVersions(step);
+                        setUpdateOpen(o ? i : null);
+                      }}
+                      disabled={!connected}
+                      onUpdate={() => {
+                        stepUpdates.apply([i]);
+                        setUpdateOpen(null);
+                      }}
+                    />
+                  )}
+                </Group>
                 {/* Underline doubles as this step's scroll-progress track,
                     filled imperatively by Transcript. */}
                 <Box
@@ -511,6 +668,23 @@ export function WorkflowStepper({
             </Fragment>
           );
         })}
+        {updateCount > 1 && (
+          <Tooltip label="Run every pending step on its newer library content" withArrow fz="xs">
+            <Button
+              size="compact-xs"
+              variant="light"
+              color="yellow"
+              style={{ flexShrink: 0 }}
+              leftSection={<IconRefresh size={12} />}
+              disabled={!connected}
+              onClick={() =>
+                stepUpdates.apply(stepUpdates.updates.flatMap((u, i) => (u ? [i] : [])))
+              }
+            >
+              Update all {updateCount}
+            </Button>
+          </Tooltip>
+        )}
         {tunable && (
           <Tooltip label="Models and goals for the steps still to come" withArrow fz="xs">
             <ActionIcon
