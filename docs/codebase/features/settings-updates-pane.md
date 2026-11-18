@@ -54,6 +54,10 @@ is picked up within seconds, with no restart and no manual "check again".
   `appVersion`
 - `server/src/workerClient.ts` — stashes `appVersion` from a successful hello, surfaces it on
   `status.version`, folds it into `sameStatus`
+- `web/src/components/SessionsSection.tsx` — the **Code Mode (Experimental)** switch under Replies;
+  disabled from the same `claudeCli` status this pane shows
+- `server/src/sessions.ts` (`buildQueryOptions`) — adds `CLAUDE_CODE_EXPERIMENTAL_CODE_MODE=1` to the
+  CLI environment when the setting is on and the CLI passes the gate
 
 ## Symbols
 
@@ -64,6 +68,8 @@ is picked up within seconds, with no restart and no manual "check again".
   `claudeCliStatus()`/`codexCliStatus()` may reach a client through; build the wire object
   field by field
 - `WorkerClient.status` / `sameStatus` — worker link health, now version-aware
+- `claudeCliSupportsCodeMode(status)` / `CODE_MODE_MIN_CLAUDE_VERSION` — the Code Mode gate; the
+  floor is `CLAUDE_CODE_MODE_MIN_VERSION` in `shared/types.ts`, separate from `MIN_CLAUDE_VERSION`
 - `UpdatesSection`, `VersionRow`, `CliBadge` — the pane, its repeated row shape, and the
   shared not-ok badge both CLI rows use
 
@@ -96,6 +102,8 @@ gated for the scalar reads), and the model picker's `warn` option
 - `server/src/workerClient.test.ts` — a worker restarting on a new build (same link, no outage)
   still publishes a status change, because `version` is now part of `sameStatus`; a worker too
   old to send `appVersion` reports `connected: true` with no `version` key at all
+- `server/src/sessions.claudeCli.test.ts` — the Code Mode env var is sent only when the setting is
+  `true` and the CLI is at or above the gate; an older CLI still runs the turn without it
 - `server/src/codexCli.test.ts` — a missing CLI is re-probed after `RETRY_FAILED_AFTER_MS` and
   reports `ok` once installed, without a restart; a working answer stays cached even after the
   binary is removed (mocked `Date`, not a real sleep)
@@ -109,6 +117,12 @@ gated for the scalar reads), and the model picker's `warn` option
   (`CODEX_INSTALL_COMMAND`, `npm i -g @openai/codex`) rather than a link, since there is no
   single install page to send someone to. `VersionRow`'s version text is suppressed when an
   action is present — an em dash next to a fix action is noise, not information.
+- **Code Mode is off unless the setting is explicitly `true`, and only applies to a Claude CLI at
+  or above `CLAUDE_CODE_MODE_MIN_VERSION` (2.1.323).** Below the gate the turn still runs, just
+  without the env var; `MIN_CLAUDE_VERSION` is not raised. A CLI that reports no parsable version is
+  let through, as the main floor does. The switch is disabled, with the required version named,
+  whenever the CLI is missing, outdated, or below the gate. Experimental: the flag is an upstream
+  CLI feature that may change or disappear, and nothing here guarantees its behaviour.
 - A CLI status of `null` (a bridge too old to report it, or no `hello` yet) renders its own
   gray "not reported by this bridge" badge — **not** the same as `ok`. Collapsing the two would
   hide a genuinely missing CLI behind a bridge that simply predates the field.

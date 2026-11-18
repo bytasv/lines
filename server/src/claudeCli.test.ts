@@ -6,6 +6,8 @@ import { test } from 'node:test';
 import {
   candidatePaths,
   claudeCliRefusalMessage,
+  claudeCliSupportsCodeMode,
+  CODE_MODE_MIN_CLAUDE_VERSION,
   compareVersions,
   findClaudeCli,
   MIN_CLAUDE_VERSION,
@@ -148,4 +150,21 @@ test('the wire copy carries the version and never the binary path', () => {
 test('the wire copy of a missing CLI omits the version rather than sending undefined', () => {
   const wire = publicClaudeCliStatus(resolveClaudeCliStatus({ ...base, isExecutable: () => false }));
   assert.deepEqual(wire, { state: 'missing', minVersion: MIN_CLAUDE_VERSION });
+});
+
+test('Code Mode is gated at 2.1.323, separately from the main floor', () => {
+  assert.equal(CODE_MODE_MIN_CLAUDE_VERSION, '2.1.323');
+  const ok = (version?: string) =>
+    claudeCliSupportsCodeMode({ state: 'ok', ...(version ? { version } : {}), minVersion: MIN_CLAUDE_VERSION });
+  assert.equal(ok('2.1.322'), false);
+  assert.equal(ok('2.1.323'), true);
+  assert.equal(ok('2.1.325'), true);
+  assert.equal(ok('2.2.0'), true);
+  // An unparsable version is let through, as the main floor does.
+  assert.equal(ok(), true);
+  assert.equal(claudeCliSupportsCodeMode({ state: 'missing', minVersion: MIN_CLAUDE_VERSION }), false);
+  assert.equal(
+    claudeCliSupportsCodeMode({ state: 'outdated', version: '2.1.100', minVersion: MIN_CLAUDE_VERSION }),
+    false,
+  );
 });

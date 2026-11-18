@@ -107,7 +107,7 @@ import {
   sameContextSummary,
   summarizeContextBreakdown,
 } from './contextBreakdown.ts';
-import { claudeCliRefusalMessage, claudeCliStatus } from './claudeCli.ts';
+import { claudeCliRefusalMessage, claudeCliStatus, claudeCliSupportsCodeMode } from './claudeCli.ts';
 import { codexCliRefusalMessage, codexCliStatus } from './codexCli.ts';
 import { OPENAI_CONNECT_MESSAGE, type OpenaiAuthManager } from './openaiAuth.ts';
 import { runHelperQuery } from './helperQuery.ts';
@@ -2048,6 +2048,15 @@ export class SessionManager {
     // options stay byte-identical to before.
     const extraRoots = this.rootsFor(meta).filter((root) => root !== meta.cwd);
 
+    // Experimental Code Mode: off unless explicitly `true`, read fresh like the
+    // toggles above, and only for a CLI new enough to know the flag. Built into
+    // its own env layer so it reaches the CLI even with no access token.
+    const codeMode = settings?.claudeCodeMode === true && claudeCliSupportsCodeMode(claudeCliStatus());
+    const envOverrides: Record<string, string> = {
+      ...(accessToken ? { CLAUDE_CODE_OAUTH_TOKEN: accessToken } : {}),
+      ...(codeMode ? { CLAUDE_CODE_EXPERIMENTAL_CODE_MODE: '1' } : {}),
+    };
+
     // Enabled user connections only, with their header values attached here and
     // nowhere else. The worker merges the Lines in-process server on top of this
     // map (see ensureSession), so a connection can never shadow it.
@@ -2089,7 +2098,9 @@ export class SessionManager {
       // let a signed-in user inherit the ambient ~/.claude CLI login — that is a
       // separate store the app cannot refresh, so a stale one 401s forever.
       // Null only when no AuthManager is wired at all (tests / embedding).
-      ...(accessToken ? { env: { ...process.env, CLAUDE_CODE_OAUTH_TOKEN: accessToken } } : {}),
+      // Code Mode rides the same env object; absent when neither is set, so an
+      // untouched session's serialized options stay byte-identical.
+      ...(Object.keys(envOverrides).length ? { env: { ...process.env, ...envOverrides } } : {}),
       // Serialized bridge → worker and spread into the worker's own query(), so
       // this one line is what makes the packaged app use the machine's CLI.
       ...claudeExecutableOption(),

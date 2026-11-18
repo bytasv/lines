@@ -211,6 +211,15 @@ export const CODEX_INSTALL_COMMAND = 'npm i -g @openai/codex';
  * Below it everything still works; the browser only suggests the update.
  */
 export const CODEX_LIVE_STEER_MIN_VERSION = '0.159.0';
+/**
+ * The first Claude Code CLI with the experimental Code Mode
+ * (`CLAUDE_CODE_EXPERIMENTAL_CODE_MODE=1`), gating
+ * `UserUiSettings.claudeCodeMode`. Separate from the bridge's own
+ * `MIN_CLAUDE_VERSION` floor: an older CLI still runs every turn, it just never
+ * gets the flag. Here rather than in server/src/claudeCli.ts so Settings can
+ * name it on a disabled toggle without importing server code.
+ */
+export const CLAUDE_CODE_MODE_MIN_VERSION = '2.1.323';
 
 export type WhisperState = 'ready' | 'missing-binary' | 'missing-model' | 'outdated';
 
@@ -3519,6 +3528,15 @@ export interface UserUiSettings {
    *  longer carry their own toggle, so changing it applies the next time each
    *  session's worker starts a fresh query (not to one already running). */
   compressResponses?: boolean;
+  /**
+   * Experimental: start every Claude query with
+   * `CLAUDE_CODE_EXPERIMENTAL_CODE_MODE=1`, so the CLI may batch tool calls into
+   * one script. Off unless explicitly `true`. Global and read fresh on every
+   * push, exactly like `compressResponses`, so it applies the next time a
+   * session's worker starts a fresh query. Ignored when the discovered CLI is
+   * older than {@link CLAUDE_CODE_MODE_MIN_VERSION}, and never reaches codex.
+   */
+  claudeCodeMode?: boolean;
   /**
    * Effort plan-mode turns run at, whichever session they belong to. Global for
    * the same reason codex's own equivalent (`plan_mode_reasoning_effort`) is a

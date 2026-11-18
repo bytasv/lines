@@ -1,7 +1,13 @@
 import { useId, useState } from 'react';
 import { SegmentedControl, Select } from '@mantine/core';
 import type { PermissionMode, ReasoningEffort } from '@lines/shared';
-import { capabilitiesForModel, providerForModel, REASONING_EFFORTS } from '@lines/shared';
+import {
+  capabilitiesForModel,
+  CLAUDE_CODE_MODE_MIN_VERSION,
+  compareVersions,
+  providerForModel,
+  REASONING_EFFORTS,
+} from '@lines/shared';
 import { useStore } from '../store';
 import {
   AUTO_EFFORT,
@@ -33,12 +39,22 @@ export function SessionsSection({ onOpenUpdates }: { onOpenUpdates: () => void }
   const setAutoContinueInterrupted = useStore((s) => s.setAutoContinueInterrupted);
   const compressResponses = useStore((s) => s.compressResponses);
   const setCompressResponses = useStore((s) => s.setCompressResponses);
+  const claudeCodeMode = useStore((s) => s.claudeCodeMode);
+  const setClaudeCodeMode = useStore((s) => s.setClaudeCodeMode);
   const planReasoningEffort = useStore((s) => s.planReasoningEffort);
   const setPlanReasoningEffort = useStore((s) => s.setPlanReasoningEffort);
   const planModeRejectWrites = useStore((s) => s.planModeRejectWrites);
   const setPlanModeRejectWrites = useStore((s) => s.setPlanModeRejectWrites);
   const planModeAiReadCheck = useStore((s) => s.planModeAiReadCheck);
   const setPlanModeAiReadCheck = useStore((s) => s.setPlanModeAiReadCheck);
+
+  // Same verdict the bridge reaches before setting the env var: a missing or
+  // outdated CLI, or a known version below the Code Mode floor. Unknown (no
+  // status yet, or a version the CLI would not report) leaves it enabled.
+  const codeModeBlocked =
+    claudeCli != null &&
+    (claudeCli.state !== 'ok' ||
+      (claudeCli.version != null && compareVersions(claudeCli.version, CLAUDE_CODE_MODE_MIN_VERSION) < 0));
 
   return (
     <>
@@ -179,6 +195,17 @@ export function SessionsSection({ onOpenUpdates }: { onOpenUpdates: () => void }
           description="Claude replies tersely, using fewer output tokens. Code, commits and security warnings stay in plain prose. Takes effect on each session's next fresh turn."
           checked={compressResponses}
           onChange={setCompressResponses}
+        />
+        <SettingsSwitchRow
+          label="Code Mode (Experimental)"
+          description={
+            codeModeBlocked
+              ? `Needs Claude Code ${CLAUDE_CODE_MODE_MIN_VERSION} or newer on this machine. Update it in Updates.`
+              : 'Claude runs short scripts instead of one tool call at a time. Takes effect on each session\'s next fresh turn.'
+          }
+          checked={claudeCodeMode && !codeModeBlocked}
+          disabled={codeModeBlocked}
+          onChange={setClaudeCodeMode}
         />
       </SettingsGroup>
     </>

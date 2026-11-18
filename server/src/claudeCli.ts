@@ -19,7 +19,7 @@ import { createRequire } from 'node:module';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { CLAUDE_INSTALL_URL, compareVersions } from '@lines/shared';
+import { CLAUDE_CODE_MODE_MIN_VERSION, CLAUDE_INSTALL_URL, compareVersions } from '@lines/shared';
 import type { ClaudeCliState, ClaudeCliStatus } from '@lines/shared';
 
 // The shapes live in shared/types.ts because the browser renders them in
@@ -40,6 +40,25 @@ export type { ClaudeCliState, ClaudeCliStatus };
  * year-old CLI gets that string and no way to guess what it means.
  */
 export const MIN_CLAUDE_VERSION = '2.1.211';
+
+/**
+ * The first CLI with the experimental Code Mode. Declared in shared/types.ts so
+ * Settings can name it; re-exported under the name the bridge reads. Not a
+ * floor: below it turns still run, just without the flag.
+ */
+export const CODE_MODE_MIN_CLAUDE_VERSION = CLAUDE_CODE_MODE_MIN_VERSION;
+
+/**
+ * Whether the discovered CLI may be handed `CLAUDE_CODE_EXPERIMENTAL_CODE_MODE`.
+ * Needs a working CLI; an unparsable version is let through on the same terms
+ * as the main floor check in {@link resolveClaudeCliStatus} — an unknown env
+ * var is inert to a CLI that predates it.
+ */
+export function claudeCliSupportsCodeMode(status: ClaudeCliStatus): boolean {
+  if (status.state !== 'ok') return false;
+  if (!status.version) return true;
+  return compareVersions(status.version, CODE_MODE_MIN_CLAUDE_VERSION) >= 0;
+}
 
 // Where to send someone who has no CLI at all. Declared in shared/types.ts
 // beside the status shape, so the browser's install button and this module's

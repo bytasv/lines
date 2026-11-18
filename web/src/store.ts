@@ -137,6 +137,7 @@ const AUTO_CONTINUE_KEY = 'lines.autoContinueInterrupted';
 const PLAN_REJECT_WRITES_KEY = 'lines.planModeRejectWrites';
 const PLAN_AI_READ_CHECK_KEY = 'lines.planModeAiReadCheck';
 const COMPRESS_RESPONSES_KEY = 'lines.compressResponses';
+const CLAUDE_CODE_MODE_KEY = 'lines.claudeCodeMode';
 const PLAN_REASONING_EFFORT_KEY = 'lines.planReasoningEffort';
 const SMART_ROUTING_KEY = 'lines.smartRouting';
 const DISMISSED_CHECKOUTS_KEY = 'lines.dismissedCheckouts';
@@ -264,6 +265,11 @@ function loadPlanModeAiReadCheck(): boolean {
 /** On unless explicitly turned off, matching the bridge-side default. */
 function loadCompressResponses(): boolean {
   return localStorage.getItem(COMPRESS_RESPONSES_KEY) !== 'false';
+}
+
+/** Off unless explicitly turned on, matching the bridge-side default. */
+function loadClaudeCodeMode(): boolean {
+  return localStorage.getItem(CLAUDE_CODE_MODE_KEY) === 'true';
 }
 
 function loadVoiceLanguage(): string {
@@ -1345,6 +1351,8 @@ interface UiState {
   planModeAiReadCheck: boolean;
   /** Append the response-compression ruleset to every session's system prompt. Global. */
   compressResponses: boolean;
+  /** Experimental: run Claude queries with Code Mode on. Global. */
+  claudeCodeMode: boolean;
   /** Dictation language: `auto` or an ISO 639-1 code. Synced with the settings. */
   voiceLanguage: string;
   /** Turn dictation in any language into English text. */
@@ -1505,6 +1513,7 @@ interface UiState {
   setPlanModeRejectWrites: (on: boolean) => void;
   setPlanModeAiReadCheck: (on: boolean) => void;
   setCompressResponses: (on: boolean) => void;
+  setClaudeCodeMode: (on: boolean) => void;
   setVoiceLanguage: (code: string) => void;
   setVoiceTranslate: (on: boolean) => void;
   /** `null` clears it back to per-session effort. */
@@ -1547,6 +1556,7 @@ export const useStore = create<UiState>((set, get) => {
         planModeRejectWrites: s.planModeRejectWrites,
         planModeAiReadCheck: s.planModeAiReadCheck,
         compressResponses: s.compressResponses,
+        claudeCodeMode: s.claudeCodeMode,
         voiceLanguage: s.voiceLanguage,
         voiceTranslate: s.voiceTranslate,
         planReasoningEffort: s.planReasoningEffort,
@@ -1662,6 +1672,7 @@ export const useStore = create<UiState>((set, get) => {
       planModeRejectWrites: s.planModeRejectWrites ?? state.planModeRejectWrites,
       planModeAiReadCheck: s.planModeAiReadCheck ?? state.planModeAiReadCheck,
       compressResponses: s.compressResponses ?? state.compressResponses,
+      claudeCodeMode: s.claudeCodeMode ?? state.claudeCodeMode,
       voiceLanguage: s.voiceLanguage ?? state.voiceLanguage,
       voiceTranslate: s.voiceTranslate ?? state.voiceTranslate,
       planReasoningEffort: s.planReasoningEffort ?? state.planReasoningEffort,
@@ -1682,6 +1693,7 @@ export const useStore = create<UiState>((set, get) => {
     if (s.planModeRejectWrites != null) localStorage.setItem(PLAN_REJECT_WRITES_KEY, String(s.planModeRejectWrites));
     if (s.planModeAiReadCheck != null) localStorage.setItem(PLAN_AI_READ_CHECK_KEY, String(s.planModeAiReadCheck));
     if (s.compressResponses != null) localStorage.setItem(COMPRESS_RESPONSES_KEY, String(s.compressResponses));
+    if (s.claudeCodeMode != null) localStorage.setItem(CLAUDE_CODE_MODE_KEY, String(s.claudeCodeMode));
     if (s.voiceLanguage) localStorage.setItem(VOICE_LANGUAGE_KEY, s.voiceLanguage);
     if (s.voiceTranslate != null) localStorage.setItem(VOICE_TRANSLATE_KEY, String(s.voiceTranslate));
     if (s.planReasoningEffort) localStorage.setItem(PLAN_REASONING_EFFORT_KEY, s.planReasoningEffort);
@@ -1843,6 +1855,7 @@ export const useStore = create<UiState>((set, get) => {
   planModeRejectWrites: loadPlanModeRejectWrites(),
   planModeAiReadCheck: loadPlanModeAiReadCheck(),
   compressResponses: loadCompressResponses(),
+  claudeCodeMode: loadClaudeCodeMode(),
   voiceLanguage: loadVoiceLanguage(),
   voiceTranslate: localStorage.getItem(VOICE_TRANSLATE_KEY) === 'true',
   planReasoningEffort: loadPlanReasoningEffort(),
@@ -2243,6 +2256,12 @@ export const useStore = create<UiState>((set, get) => {
   setCompressResponses: (on) => {
     localStorage.setItem(COMPRESS_RESPONSES_KEY, String(on));
     set({ compressResponses: on });
+    pushSettings();
+  },
+
+  setClaudeCodeMode: (on) => {
+    localStorage.setItem(CLAUDE_CODE_MODE_KEY, String(on));
+    set({ claudeCodeMode: on });
     pushSettings();
   },
 

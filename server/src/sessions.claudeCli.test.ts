@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import type { ServerMessage, SessionMeta } from '@lines/shared';
+import type { ServerMessage, SessionMeta, UserUiSettings } from '@lines/shared';
 import type { AuthManager } from './auth.ts';
 import { GuardAllowlist } from './autoGuard.ts';
 import { SessionManager } from './sessions.ts';
@@ -35,10 +35,11 @@ const meta = (id: string): SessionMeta =>
   }) as SessionMeta;
 
 /** Same shape as sessions.spawn.test.ts: a manager over a throwaway store. */
-function harness() {
+function harness(settings?: UserUiSettings) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lines-cli-store-'));
   fs.writeFileSync(path.join(root, 'sessions.json'), JSON.stringify([meta('s1')]));
   const store = createStore(root);
+  if (settings) store.saveSettings(settings);
   const auth = {
     getAccessTokenSync: () => 'tok',
     ensureFreshToken: async () => 'tok',
@@ -51,8 +52,17 @@ function harness() {
     push: (_sessionId: string, _message: unknown, options: Record<string, unknown>) => pushes.push(options),
     close: () => {},
   } as unknown as WorkerClient);
-  return { sessions, pushes };
+  return { sessions, pushes, store };
 }
+
+/** A fake `claude` that reports `version`, so the Code Mode floor is testable. */
+function fakeCli(version: string): string {
+  const bin = path.join(fs.mkdtempSync(path.join(TMP, 'v-')), 'claude');
+  fs.writeFileSync(bin, `#!/bin/sh\necho "${version} (Claude Code)"\n`, { mode: 0o755 });
+  return bin;
+}
+
+const envOf = (options: Record<string, unknown>) => options.env as Record<string, string> | undefined;
 
 /** Let the fire-and-forget pushTurn chain settle (no timers involved). */
 async function settle() {
@@ -93,4 +103,64 @@ test('a turn is refused with install instructions when there is no CLI', async (
   assert.match(message, /Claude Code not found on this machine/);
   assert.match(message, /docs\.claude\.com/);
   assert.equal(h.sessions.get('s1')?.status, 'error');
+});
+
+test('Code Mode on with a new enough CLI adds the flag beside the OAuth token', async () => {
+  process.env.LINES_CLAUDE_PATH = fakeCli('2.1.323');
+  await refresh();
+  const h = harness({ claudeCodeMode: true });
+
+  h.sessions.prompt('s1', 'hello');
+  await settle();
+
+  const env = envOf(h.pushes[0]!);
+  assert.equal(env?.CLAUDE_CODE_EXPERIMENTAL_CODE_MODE, '1');
+  assert.equal(env?.CLAUDE_CODE_OAUTH_TOKEN, 'tok');
+});
+
+test('Code Mode off or unset never sends the flag', async () => {
+  process.env.LINES_CLAUDE_PATH = fakeCli('2.1.325');
+  await refresh();
+  for (const settings of [undefined, { claudeCodeMode: false }] as const) {
+    const h = harness(settings);
+    h.sessions.prompt('s1', 'hello');
+    await settle();
+    const env = envOf(h.pushes[0]!);
+    // Only what the bridge itself sets is asserted: an ambient var the bridge
+    // was started with is inherited through process.env, not added here.
+    if (!process.env.CLAUDE_CODE_EXPERIMENTAL_CODE_MODE) {
+      assert.equal(env?.CLAUDE_CODE_EXPERIMENTAL_CODE_MODE, undefined);
+    }
+    assert.equal(env?.CLAUDE_CODE_OAUTH_TOKEN, 'tok');
+  }
+});
+
+test('Code Mode is skipped on a CLI older than its floor, and the turn still runs', async () => {
+  process.env.LINES_CLAUDE_PATH = fakeCli('2.1.322');
+  await refresh();
+  const h = harness({ claudeCodeMode: true });
+
+  h.sessions.prompt('s1', 'hello');
+  await settle();
+
+  assert.equal(h.pushes.length, 1);
+  const env = envOf(h.pushes[0]!);
+  if (!process.env.CLAUDE_CODE_EXPERIMENTAL_CODE_MODE) {
+    assert.equal(env?.CLAUDE_CODE_EXPERIMENTAL_CODE_MODE, undefined);
+  }
+  assert.equal(env?.CLAUDE_CODE_OAUTH_TOKEN, 'tok');
+});
+
+test('a Code Mode toggle reaches the next turn without touching the session', async () => {
+  process.env.LINES_CLAUDE_PATH = fakeCli('2.1.325');
+  await refresh();
+  const h = harness({ claudeCodeMode: false });
+
+  h.sessions.prompt('s1', 'hello');
+  await settle();
+  h.store.saveSettings({ claudeCodeMode: true });
+  h.sessions.prompt('s1', 'again');
+  await settle();
+
+  assert.equal(envOf(h.pushes[1]!)?.CLAUDE_CODE_EXPERIMENTAL_CODE_MODE, '1');
 });

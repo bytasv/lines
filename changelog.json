@@ -1,6 +1,16 @@
 {
   "web": [
     {
+      "version": "0.1.42",
+      "date": "2026-11-18",
+      "items": [
+        {
+          "text": "Turn on the experimental Code Mode in Settings → Sessions to let Claude batch its file reads and searches into short scripts instead of one tool call at a time; it needs Claude Code 2.1.323 or newer.",
+          "image": "web-0.1.42-code-mode.png"
+        }
+      ]
+    },
+    {
       "version": "0.1.41",
       "date": "2026-11-16",
       "items": [
@@ -441,6 +451,7 @@
     {
       "text": "After a network change or waking from sleep, Lines reconnects by itself, and the “Can’t reach Lines” page retries on its own once you are back online.",
       "image": "desktop-next-network-reconnect.png"
-    }
+    },
+    "With Code Mode turned on, sessions start Claude Code with its experimental Code Mode; an older Claude Code keeps working without it."
   ]
 }

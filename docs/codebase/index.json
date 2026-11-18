@@ -4077,7 +4077,9 @@
         "server/src/worker.ts",
         "server/src/workerClient.ts",
         "server/src/codexCli.ts",
-        "web/src/components/WhatsNewSection.tsx"
+        "web/src/components/WhatsNewSection.tsx",
+        "web/src/components/SessionsSection.tsx",
+        "server/src/sessions.ts"
       ],
       "symbols": [
         "publicClaudeCliStatus",
@@ -4089,12 +4091,15 @@
         "WorkerStatus.version",
         "publicCodexCliStatus",
         "CodexCliState",
-        "CodexCliStatus"
+        "CodexCliStatus",
+        "claudeCliSupportsCodeMode",
+        "CODE_MODE_MIN_CLAUDE_VERSION"
       ],
       "tests": [
         "server/src/claudeCli.test.ts",
         "server/src/workerClient.test.ts",
-        "server/src/codexCli.test.ts"
+        "server/src/codexCli.test.ts",
+        "server/src/sessions.claudeCli.test.ts"
       ],
       "businessRules": [
         "versions shown are web, bridge, worker, desktop app, and Claude CLI only",
@@ -4104,7 +4109,8 @@
         "an unknown version renders as a dimmed em dash rather than an omitted row, so the pane's shape never changes",
         "hello.claudeCli never carries the CLI binary's absolute path — publicClaudeCliStatus builds the wire object field by field rather than spreading the bridge-local status",
         "hello.claudeCli and the worker's hello.appVersion are both optional, so neither bumps a protocol version",
-        "both CLI probes are self-healing: a working answer is cached for the process lifetime, but a missing/outdated verdict is only trusted for RETRY_FAILED_AFTER_MS (10s); the bridge re-probes on a 15s interval and broadcasts a 'cliStatus' message to every context only when the combined answer actually changes, so installing a CLI clears the pane and the model picker without a restart"
+        "both CLI probes are self-healing: a working answer is cached for the process lifetime, but a missing/outdated verdict is only trusted for RETRY_FAILED_AFTER_MS (10s); the bridge re-probes on a 15s interval and broadcasts a 'cliStatus' message to every context only when the combined answer actually changes, so installing a CLI clears the pane and the model picker without a restart",
+        "Code Mode (claudeCode setting) sends CLAUDE_CODE_EXPERIMENTAL_CODE_MODE=1 only when the setting is explicitly true and the discovered Claude CLI is at or above CLAUDE_CODE_MODE_MIN_VERSION (2.1.323); off unless true, read fresh per query, never on the codex path; a CLI below the gate still runs turns without the variable, and the switch is disabled while the CLI is missing, outdated, or below the gate"
       ],
       "architecturalRules": [
         "ClaudeCliState/ClaudeCliStatus are declared in shared/types.ts and re-exported from server/src/claudeCli.ts, so the browser can read the shape without importing server code",
