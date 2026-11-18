@@ -3478,6 +3478,9 @@ export class SessionManager {
         this.returnSteersToQueue(meta.id, { pause: opts.interrupted });
       }, STEER_ACK_GRACE_MS),
     );
+    // A fallback for an ack that may never come; the bridge's server keeps the
+    // process alive on its own, so this timer must not.
+    this.steerFallbacks.get(meta.id)?.unref?.();
   }
 
   private clearSteerFallback(sessionId: string) {
@@ -4807,7 +4810,11 @@ export class SessionManager {
     parts.push(ask.text);
     const prompt = parts.join('\n\n');
 
+    // Unref'd: it only aborts a question already in flight, so it must never be
+    // the one thing keeping the process alive (a test that leaves a question
+    // unanswered used to hang its file for the full five minutes).
     const timer = setTimeout(() => controller.abort(), this.planChatTimeoutMs);
+    timer.unref?.();
     const startedAt = Date.now();
     // Streamed text, broadcast at most every PLAN_CHAT_PARTIAL_MS and never
     // persisted (the final answer is the record). `settled` stops a throttled
