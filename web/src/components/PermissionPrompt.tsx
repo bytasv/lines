@@ -47,6 +47,7 @@ import {
   DECLINE_PLAN_MESSAGE,
   KEEP_PLANNING_MESSAGE,
   PLAN_REPLY_MARKER,
+  PROPOSE_UI_TOOL,
   normalizePlanComments,
 } from '@lines/shared';
 import { send } from '../ws';
@@ -59,6 +60,7 @@ import { DictateButton, DictationError, dictateSectionWidth } from './DictateBut
 import { useIsPhone } from '../lib/layout';
 import { useIdentityResolver } from '../lib/identity';
 import { QuestionPrompt } from './QuestionPrompt';
+import { ChosenDesigns, ProposalPermission } from './UiProposal';
 import { PlanChat } from './PlanChat';
 import { Markdown } from './Markdown';
 import { computeDiff, isEditTool, type ToolBlock } from '../lib/transcript';
@@ -1632,6 +1634,8 @@ function PlanApproval({
         </Group>
         {resolution && reply && <PlanReply data={data} text={reply} />}
         <Collapse expanded={expanded} transitionDuration={150}>
+          {/* What the plan will build, when it was picked on a proposal card. */}
+          <ChosenDesigns sessionId={sessionId} before={data.requestId} mb="xs" />
           <ScrollArea.Autosize mah={320} type="auto">
             {/* Not default-hover: that shade now reads as a user bubble. */}
             <Paper bg="var(--mantine-color-default)" radius="md" px="sm" py={4}>
@@ -1725,6 +1729,7 @@ function PlanApproval({
           >
           <ScrollArea style={{ flex: 1, minHeight: 0 }}>
             <Box maw={760} mx="auto" px="xl" pb="xl">
+              <ChosenDesigns sessionId={sessionId} before={data.requestId} mb="md" />
               <CommentablePlan
                 sessionId={sessionId}
                 text={shown}
@@ -1808,6 +1813,10 @@ export function PermissionPrompt({
   // Clarifying questions get a dedicated interactive card instead of raw JSON.
   if (data.toolName === 'AskUserQuestion') {
     return <QuestionPrompt sessionId={sessionId} data={data} resolution={resolution} />;
+  }
+  // A UI proposal is answered on its own tool card, next to the mocks.
+  if (data.toolName === PROPOSE_UI_TOOL) {
+    return <ProposalPermission resolution={resolution} />;
   }
   // Plans get a full-screen distraction-free review mode.
   if (data.toolName === 'ExitPlanMode') {

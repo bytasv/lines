@@ -225,6 +225,25 @@ has no approval card in front of it, so it gets the reads only.
   `allowWrites` is false. `LINES_READ_ONLY_MANIFEST` is built from the same
   `READ_TOOLS` specs as `LINES_TOOL_MANIFEST`, so the two cannot drift.
 
+## propose_ui (visual options)
+
+`propose_ui` is the one Lines tool that is not about workflows: it shows the user one to four UI
+mocks in the chat, to compare and pick from (rendering in [transcript-rendering](transcript-rendering.md)).
+It is declared `readOnly`, so it is in both manifests and the codex door serves it, but it is not
+a read in the sense of this doc: on the Claude door it is in `ALWAYS_ASK_TOOLS`, so every call raises
+a card the user answers, and the user's answer (a pick with an optional note, a change request, or a
+dismissal) comes back as the call's result. Nothing is stored by the dispatcher; the transcript's
+tool event carries the proposal.
+
+The dispatcher checks the shape and size before the card is raised: a title, 1–4 versions, unique
+non-empty labels (case-insensitive), 200 KB of HTML per version and 600 KB per call. A malformed call
+gets no card, and the agent sees the validation message.
+
+The `answer` argument is written only by the card. The schema lists it because the worker's
+schema-to-Zod conversion drops any key it does not name; whatever the agent puts there is replaced by
+the card's answer. `revise: true` merges a call into the earlier set with the same title, by label.
+On codex there is no card: the call returns at once, and the user answers with a prompt instead.
+
 ## Two front doors
 
 The Claude SDK lets a client host an MCP server **in process** (`createSdkMcpServer`),
@@ -271,7 +290,7 @@ context, and a store directory, for any string handed to it.
 **Write.** On the Claude door every write reaches the user as a permission card
 before it runs (`handlePreToolUse`/`handleCanUseTool`). Nothing on the codex door
 can raise one — the call is a plain HTTP request from codex's child — so it serves
-the six reads and nothing else, and the dispatcher refuses a write even when one is
+the six reads and `propose_ui` (read-only, and it needs no card because it changes nothing), and the dispatcher refuses a write even when one is
 called unlisted, answering that Lines tools are read-only here and the user can
 make the change in Lines. Changing a workflow, a step or a connection from a codex
 session means asking the user to do it.

@@ -18,6 +18,7 @@ import {
   isPlanFilePath,
   isRecoveringResult,
   isStoppedResult,
+  PROPOSE_UI_TOOL,
   resultErrorText,
   subagentParentId,
 } from '@lines/shared';
@@ -39,6 +40,30 @@ export interface ToolBlock {
    *  row is pushed when this is set. The tool's own `result` says nothing here: a
    *  backgrounded Agent gets "Async agent launched successfully" the instant it starts. */
   background?: { taskId: string; status: 'running' | 'completed' | 'failed' | 'stopped' };
+  /** `propose_ui` only: see {@link ProposalThread}. */
+  proposal?: ProposalThread;
+}
+
+/**
+ * Where a `propose_ui` call sits among the calls revising it. A `revise: true`
+ * call with the same title as an earlier one carries only the versions that
+ * changed; the user compares the merged set on the newest card, and the cards it
+ * replaced fold away (`supersededBy`).
+ */
+export interface ProposalThread {
+  /** 1 for a fresh proposal, +1 per revision. */
+  revision: number;
+  /** The whole set this card shows: earlier versions with this call's swapped in. */
+  versions: UiProposalVersion[];
+  /** Labels this call replaced or added (empty for a fresh proposal). */
+  revised: string[];
+  /**
+   * Every revision of each version, oldest first, keyed by its label in
+   * `versions` — so the user can go back to one they preferred.
+   */
+  history: Record<string, UiProposalVersion[]>;
+  /** The later call that revised this one, once there is one. */
+  supersededBy?: string;
 }
 
 export type AssistantBlock =
@@ -281,6 +306,49 @@ export function buildTranscript(
 ): { items: TranscriptItem[]; live: LiveActivity | null } {
   const items: TranscriptItem[] = [];
   const toolBlocks = new Map<string, ToolBlock>();
+  // The newest proposal card per title (lower-cased), which a revision merges into.
+  const proposalsByTitle = new Map<string, ToolBlock>();
+  const threadProposal = (tool: ToolBlock) => {
+    const parsed = parseProposalInput(tool.input);
+    if (!parsed) return;
+    const key = parsed.title.toLowerCase();
+    const prev = parsed.revise ? proposalsByTitle.get(key) : undefined;
+    if (prev?.proposal) {
+      // Swapped in place by label; a new label joins the end.
+      const versions = [...prev.proposal.versions];
+      for (const v of parsed.versions) {
+        const at = versions.findIndex((o) => o.label.toLowerCase() === v.label.toLowerCase());
+        if (at >= 0) versions[at] = v;
+        else versions.push(v);
+      }
+      const history: Record<string, UiProposalVersion[]> = { ...prev.proposal.history };
+      for (const v of parsed.versions) {
+        const key = Object.keys(history).find((k) => k.toLowerCase() === v.label.toLowerCase());
+        if (key) history[key] = [...history[key], { ...v, label: key }];
+        else history[v.label] = [v];
+      }
+      // The merged set keeps each version's first label, as `history` does.
+      const merged = versions.map((v) => {
+        const key = Object.keys(history).find((k) => k.toLowerCase() === v.label.toLowerCase());
+        return key && key !== v.label ? { ...v, label: key } : v;
+      });
+      prev.proposal = { ...prev.proposal, supersededBy: tool.id };
+      tool.proposal = {
+        revision: prev.proposal.revision + 1,
+        versions: merged,
+        revised: parsed.versions.map((v) => merged.find((m) => m.label.toLowerCase() === v.label.toLowerCase())?.label ?? v.label),
+        history,
+      };
+    } else {
+      tool.proposal = {
+        revision: 1,
+        versions: parsed.versions,
+        revised: [],
+        history: Object.fromEntries(parsed.versions.map((v) => [v.label, [v]])),
+      };
+    }
+    proposalsByTitle.set(key, tool);
+  };
   const snapshots: FileSnapshotData[] = [];
   const permissionItems = new Map<string, { kind: 'permission' } & TranscriptItem>();
   const resultItems = new Map<number, ResultItem>();
@@ -665,6 +733,7 @@ export function buildTranscript(
                 };
                 toolBlocks.set(block.id, tool);
                 attachSnapshot(tool);
+                if (isProposalTool(tool.name)) threadProposal(tool);
                 if (
                   isEditTool(tool.name) &&
                   isPlanFilePath(String(tool.input.file_path ?? tool.input.notebook_path ?? ''))
@@ -677,8 +746,9 @@ export function buildTranscript(
                 }
                 // Full level (groupTools=false): each tool is its own 1-tool group,
                 // which ToolGroup renders as a bare card — i.e. ungrouped. A question
-                // takes the same path at every level: never buried in a group.
-                const isolated = !groupTools || isQuestionTool(tool.name);
+                // takes the same path at every level: never buried in a group. So does
+                // a UI proposal, which the user has to see to compare and accept.
+                const isolated = !groupTools || isQuestionTool(tool.name) || isProposalTool(tool.name);
                 if (isolated) sink.openGroup = null;
                 if (!sink.openGroup) {
                   sink.openGroup = {
@@ -1011,7 +1081,10 @@ function reuseTool(old: ToolBlock, next: ToolBlock): ToolBlock {
     // has landed — without this the card would never leave `running` on a live
     // session, while reading correctly after a reload.
     old.background?.status !== next.background?.status ||
-    old.background?.taskId !== next.background?.taskId
+    old.background?.taskId !== next.background?.taskId ||
+    // Rebuilt fresh each pass: what can move is a later revision arriving.
+    old.proposal?.revision !== next.proposal?.revision ||
+    old.proposal?.supersededBy !== next.proposal?.supersededBy
   ) {
     return next;
   }
@@ -1080,7 +1153,9 @@ export function foldAgentTurns(items: TranscriptItem[]): TranscriptItem[] {
       // An MCP authorization request is the same kind of thing: the turn cannot
       // continue until the user acts on it, so it must not fold away.
       (it.kind === 'permission' && !!it.data.elicitation && !it.resolution) ||
-      (it.kind === 'tool-group' && it.tools.length === 1 && isQuestionTool(it.tools[0].name));
+      (it.kind === 'tool-group' &&
+        it.tools.length === 1 &&
+        (isQuestionTool(it.tools[0].name) || isProposalTool(it.tools[0].name)));
     if (isBoundary) {
       flush();
       out.push(it);
@@ -1344,6 +1419,193 @@ export function isEditTool(name: string): boolean {
 /** Its own card, its own turn boundary — a question is a decision, not a step. */
 export function isQuestionTool(name: string): boolean {
   return name === 'AskUserQuestion';
+}
+
+/**
+ * The Lines tool that shows UI mocks in the chat (server/src/mcpWorkflowTools.ts).
+ * Codex reports its MCP calls under the same `mcp__<server>__<tool>` name (see
+ * shared/codex.ts), so one spelling covers both providers; only the input shape
+ * differs, which {@link parseProposalInput} unwraps.
+ */
+export const PROPOSAL_TOOL = PROPOSE_UI_TOOL;
+
+/** Its own card, its own turn boundary — like a question, a proposal waits on the user. */
+export function isProposalTool(name: string): boolean {
+  return name === PROPOSAL_TOOL;
+}
+
+/** What a settled `propose_ui` call says happened. */
+export type ProposalOutcome =
+  /** The user chose a version, with the note they left on it. */
+  | { kind: 'picked'; label: string; note?: string; revision?: number }
+  /** The user asked for changes instead of choosing — to `version`, when one was selected. */
+  | { kind: 'feedback'; text: string; version?: string; revision?: number }
+  /** Nothing waited for a pick (codex): the user answers with a prompt. */
+  | { kind: 'shown' }
+  /** The user dismissed the card. */
+  | { kind: 'dismissed' }
+  /** Refused or failed — the result text says why. */
+  | { kind: 'error'; text: string };
+
+/**
+ * Read a `propose_ui` result back into what happened, off the stable wording the
+ * server writes (`proposalAnswerText` and the dispatcher, in
+ * server/src/mcpWorkflowTools.ts). Null while the call is unsettled. A denied
+ * call is a dismissal: the card only ever goes up for a well-formed proposal,
+ * so a deny is the user's Dismiss rather than a validation error.
+ */
+export function proposalOutcome(result: string | undefined, isError?: boolean): ProposalOutcome | null {
+  if (result === undefined) return null;
+  if (isError) return /denied/i.test(result) ? { kind: 'dismissed' } : { kind: 'error', text: result };
+  const picked =
+    /^The user picked version "(.+?)"(?: \(revision (\d+)[^)]*\))? of [^\n]*\n(?:Their note: ([\s\S]*)\n)?Use that version/.exec(
+      result,
+    );
+  if (picked) {
+    return {
+      kind: 'picked',
+      label: picked[1],
+      ...(picked[2] ? { revision: Number(picked[2]) } : {}),
+      ...(picked[3]?.trim() ? { note: picked[3].trim() } : {}),
+    };
+  }
+  const feedback = /^The user asked for changes to ([^\n]*)\n([\s\S]*)\n(?:Apply these changes|Revise the mocks)/.exec(
+    result,
+  );
+  if (feedback) {
+    const target = /^version "(.+?)"(?: \(revision (\d+)[^)]*\))? of /.exec(feedback[1]);
+    return {
+      kind: 'feedback',
+      text: feedback[2].trim(),
+      ...(target ? { version: target[1] } : {}),
+      ...(target?.[2] ? { revision: Number(target[2]) } : {}),
+    };
+  }
+  // The wording before feedback named its version.
+  const older = /^The user did not pick a version of [^\n]*\n([\s\S]*)\nRevise the mocks/.exec(result);
+  if (older) return { kind: 'feedback', text: older[1].trim() };
+  if (result.startsWith('Shown ')) return { kind: 'shown' };
+  return { kind: 'error', text: result };
+}
+
+export interface UiProposalVersion {
+  label: string;
+  html: string;
+  notes?: string;
+}
+
+export interface UiProposalInput {
+  title: string;
+  versions: UiProposalVersion[];
+  /** Revises the previous proposal with this title in place (see ProposalThread). */
+  revise?: boolean;
+}
+
+/**
+ * A `propose_ui` call's input, or null until it is complete and valid: a title,
+ * 1–4 versions, each with a non-empty unique label and non-empty HTML. Claude's
+ * input arrives as the arguments themselves; codex's as
+ * `{ server, tool, arguments }`, with `arguments` an object or a JSON string.
+ * Partial (still streaming) input reads as null, so the card never renders a
+ * half-written version.
+ */
+export function parseProposalInput(input: unknown): UiProposalInput | null {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
+  let args = input as Record<string, unknown>;
+  if ('arguments' in args && 'tool' in args) {
+    let inner = args.arguments;
+    if (typeof inner === 'string') {
+      try {
+        inner = JSON.parse(inner);
+      } catch {
+        return null;
+      }
+    }
+    if (!inner || typeof inner !== 'object' || Array.isArray(inner)) return null;
+    args = inner as Record<string, unknown>;
+  }
+  const title = typeof args.title === 'string' ? args.title.trim() : '';
+  if (!title || !Array.isArray(args.versions)) return null;
+  if (args.versions.length < 1 || args.versions.length > 4) return null;
+  const versions: UiProposalVersion[] = [];
+  const seen = new Set<string>();
+  for (const entry of args.versions) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null;
+    const v = entry as Record<string, unknown>;
+    const label = typeof v.label === 'string' ? v.label.trim() : '';
+    if (!label || typeof v.html !== 'string' || !v.html.trim()) return null;
+    if (seen.has(label.toLowerCase())) return null;
+    seen.add(label.toLowerCase());
+    const notes = typeof v.notes === 'string' && v.notes.trim() ? v.notes.trim() : undefined;
+    versions.push({ label, html: v.html, ...(notes ? { notes } : {}) });
+  }
+  return { title, versions, ...(args.revise === true ? { revise: true } : {}) };
+}
+
+/** A design the user chose on a `propose_ui` card, resolved to the exact revision. */
+export interface PickedProposal {
+  /** The card's permission request — stable, for keys. */
+  requestId: string;
+  title: string;
+  label: string;
+  /** 1-based revision of `label` that was chosen, and how many it had. */
+  revision: number;
+  revisions: number;
+  version: UiProposalVersion;
+}
+
+/**
+ * The designs chosen on `propose_ui` cards, newest pick per title, oldest title
+ * first — read straight off the permission events (the card's input and its
+ * answer), so it works for any view of the session, not only the transcript.
+ * `until`, when given, stops at that permission request: a plan card shows the
+ * picks made before it. A pick on a revision resolves through its chain the way
+ * the card merged it (ProposalThread): same title, back to the last call that
+ * was not itself a revision.
+ */
+export function pickedProposals(events: TranscriptEvent[] | undefined, until?: string): PickedProposal[] {
+  if (!events) return [];
+  const asked: { requestId: string; input: UiProposalInput }[] = [];
+  const picks = new Map<string, PickedProposal>();
+  for (const event of events) {
+    if (event.kind !== 'permission') continue;
+    const d = event.data as PermissionRequestData;
+    if (until && d.requestId === until && d.toolName) break;
+    if (d.toolName === PROPOSE_UI_TOOL && !d.resolution) {
+      const input = parseProposalInput(d.input);
+      if (input) asked.push({ requestId: d.requestId, input });
+      continue;
+    }
+    const choice = d.resolution === 'allow' ? d.answers?.choice : undefined;
+    if (!choice) continue;
+    const at = asked.findIndex((a) => a.requestId === d.requestId);
+    if (at < 0) continue;
+    const title = asked[at].input.title;
+    const chain: UiProposalInput[] = [];
+    for (let i = at; i >= 0; i--) {
+      const input = asked[i].input;
+      if (input.title.toLowerCase() !== title.toLowerCase()) continue;
+      chain.unshift(input);
+      if (!input.revise) break;
+    }
+    const history = chain.flatMap((input) =>
+      input.versions.filter((v) => v.label.toLowerCase() === choice.toLowerCase()),
+    );
+    if (!history.length) continue;
+    const wanted = Number(d.answers?.revision);
+    const index = Number.isInteger(wanted) && wanted >= 1 && wanted <= history.length ? wanted - 1 : history.length - 1;
+    const key = title.toLowerCase();
+    picks.delete(key); // re-inserted, so a re-pick moves to the end
+    picks.set(key, {
+      requestId: d.requestId,
+      title,
+      label: choice,
+      revision: index + 1,
+      revisions: history.length,
+      version: history[index],
+    });
+  }
+  return [...picks.values()];
 }
 
 export interface ToolDiff {

@@ -620,6 +620,14 @@ Residual risk: the command text is written by the model and can contain text aim
 strict and only unknown commands reach it, but a wrong approval is still possible. The setting's
 description says so.
 
+### UI proposal answers
+
+`propose_ui` is in `ALWAYS_ASK_TOOLS`, so no mode, guard or allowlist can auto-allow it, and an
+expiry on a restart or interrupt does not touch it, the same as a question. Its card's answer is the
+call's result, rebuilt from the card's own record (`proposalAnswers`) before it is delivered: a
+choice must be one of the call's labels, or one from an earlier revision with the same title. In
+plan mode the card waits like any ask, so a plan can be settled by a visual choice first.
+
 ### Plan review card
 
 `buildTranscript` tracks the current turn's last edit-tool call whose file path matches
@@ -641,6 +649,11 @@ renders immediately (no empty flash) and the live `content` swaps in on arrival;
 (deleted plan, 403) silently keeps the captured text. When resolved and the live content differs
 from the captured text, a dimmed "updated since approval" hint renders next to the resolution
 badge.
+
+Before the plan text, the card shows the design the user picked on a `propose_ui` card earlier in
+the session. `pickedProposals` reads the latest pick per title from the permission events, stopping at
+the plan's own request, and `ChosenDesigns` renders that exact revision. The preview comes from the
+transcript, not from the plan text, so it shows the pick even when the plan does not mention it.
 
 ### Typed reply as "keep planning"
 

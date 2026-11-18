@@ -1,4 +1,4 @@
-import { isSessionActive, isSessionMuted, resolveStepContent } from '@lines/shared';
+import { isSessionActive, isSessionMuted, PROPOSE_UI_TOOL, resolveStepContent } from '@lines/shared';
 import type { SessionGroup, SessionMeta, SessionSort, SessionStatus, StepContent, WorkflowDef } from '@lines/shared';
 
 const STATUS_META: Record<SessionStatus, { color: string; label: string }> = {
@@ -131,6 +131,7 @@ export function waitingPermissionMeta(tool?: string): { label: string; color: st
     case 'ExitPlanMode':
       return { label: 'plan ready', color: 'violet' };
     case 'AskUserQuestion':
+    case PROPOSE_UI_TOOL:
       return { label: 'needs answer', color: 'teal' };
     default:
       return { label: 'needs permission', color: 'yellow' };

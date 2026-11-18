@@ -542,6 +542,7 @@ export function alertBody(
         case 'ExitPlanMode':
           return 'Plan ready';
         case 'AskUserQuestion':
+        case PROPOSE_UI_TOOL:
           return 'Needs answer';
         default:
           return 'Needs permission';
@@ -3774,8 +3775,16 @@ export interface MemoryReview {
 // Auto-mode guard allowlist
 // ---------------------------------------------------------------------------
 
+/**
+ * Lines' own `propose_ui` tool by its full name (server/src/mcpWorkflowTools.ts):
+ * UI mocks the user picks between. On the Claude path its card *is* the pick, so
+ * it is always-ask like a question; codex reaches it with no card and gets the
+ * fire-and-forget form instead.
+ */
+export const PROPOSE_UI_TOOL = 'mcp__lines__propose_ui';
+
 /** Tools that must always reach the user regardless of guard verdicts. */
-export const ALWAYS_ASK_TOOLS = new Set(['AskUserQuestion', 'ExitPlanMode']);
+export const ALWAYS_ASK_TOOLS = new Set(['AskUserQuestion', 'ExitPlanMode', PROPOSE_UI_TOOL]);
 
 /** User-built exception to the auto-mode guard. */
 export interface GuardAllowEntry {

@@ -55,7 +55,7 @@ import type {
   TranscriptEvent,
   WorkflowMarkerData,
 } from '@lines/shared';
-import { buildMatcher, hasEstimatedSpend, rewindBlock } from '@lines/shared';
+import { buildMatcher, hasEstimatedSpend, PROPOSE_UI_TOOL, rewindBlock } from '@lines/shared';
 import { agentLabel, sessionCaps } from '../lib/capabilities';
 import { useStore } from '../store';
 import { useReveal } from '../lib/layout';
@@ -64,6 +64,8 @@ import {
   buildTranscript,
   findItemIndexForSeq,
   foldAgentTurns,
+  isProposalTool,
+  proposalOutcome,
   reconcileItems,
   turnToolStats,
   type AgentTurnItem,
@@ -72,6 +74,7 @@ import {
 } from '../lib/transcript';
 import { REVEAL_STEP_EVENT } from '../lib/workflowReveal';
 import { requestRest } from '../lib/transcriptBackfill';
+import { TranscriptAnchorContext, type KeepInView } from '../lib/transcriptAnchor';
 import { useAttachmentUrl } from '../lib/files';
 import { mentionKindMeta } from '../lib/mentions';
 import { formatDuration, formatSpendUsd, formatTokens, skippableFailedStep } from '../lib/format';
@@ -987,7 +990,26 @@ const Item = memo(function Item({
 function isRedundant(item: { data: PermissionRequestData; resolution?: string }): boolean {
   // Auto-denies stay visible: the user should see what plan mode rejected.
   if (item.data.auto) return item.resolution !== 'deny';
-  return item.data.toolName === 'AskUserQuestion' && item.resolution === 'allow';
+  // A UI proposal's outcome reads on its tool card, so its answered row is noise too.
+  return (
+    (item.data.toolName === 'AskUserQuestion' || item.data.toolName === PROPOSE_UI_TOOL) &&
+    item.resolution === 'allow'
+  );
+}
+
+/**
+ * The newest UI proposal is waiting on its revision: the user asked for changes
+ * and no later call has replaced it yet. Proposals are always their own
+ * top-level group (never folded into a turn), so the top level is enough.
+ */
+function proposalUpdating(items: TranscriptItem[]): boolean {
+  for (let i = items.length - 1; i >= 0; i--) {
+    const it = items[i];
+    if (it.kind !== 'tool-group' || it.tools.length !== 1 || !isProposalTool(it.tools[0].name)) continue;
+    const tool = it.tools[0];
+    return !tool.proposal?.supersededBy && proposalOutcome(tool.result, tool.isError)?.kind === 'feedback';
+  }
+  return false;
 }
 
 /**
@@ -1301,6 +1323,10 @@ export function Transcript({
     if (!last) return true;
     if (last.kind === 'streaming') return false;
     if (last.kind === 'permission' && !last.resolution) return false;
+    // A proposal the user asked to change shows "Updating X…" on its own button
+    // until the revision lands; a second loader down here would read as a chat
+    // reply on the way.
+    if (proposalUpdating(items)) return false;
     const phaseOverride = live?.phase === 'thinking' || live?.phase === 'tool-prep';
     if (!phaseOverride && (last.key === activeGroupKey || last.key === activeTurnKey)) return false;
     return true;
@@ -1576,6 +1602,22 @@ export function Transcript({
   /** Follow-the-stream stands down while the user is working the scroller. */
   const following = () => pinnedRef.current && Date.now() >= gestureUntilRef.current;
 
+  // See TranscriptAnchorContext. Not a timing heuristic: the caller brackets one
+  // change of its own, and the correction lands in its layout effect, before the
+  // resize observer below gets to follow the stream past it.
+  const keepInView = useCallback<KeepInView>((el) => {
+    const viewport = viewportRef.current;
+    if (!viewport) return () => {};
+    const top = el.getBoundingClientRect().top;
+    const height = viewport.scrollHeight;
+    return () => {
+      const moved = el.getBoundingClientRect().top - top;
+      if (!moved && viewport.scrollHeight === height) return;
+      pinnedRef.current = false;
+      if (moved) viewport.scrollTop += moved;
+    };
+  }, []);
+
   const onScroll = () => {
     const el = viewportRef.current;
     if (!el) return;
@@ -1730,39 +1772,41 @@ export function Transcript({
         styles={{ content: { display: 'block' } }}
         onScrollPositionChange={onScroll}
       >
-        <Stack gap="sm" py="md" maw={920} mx="auto" ref={contentRef}>
-          {items.length === 0 && (
-            <Text size="sm" c="dimmed" ta="center" pt="xl">
-              Send a prompt to start.
-            </Text>
-          )}
-          {/* Truthful about the clipping, and the only affordance a keyboard user
-              has while the idle backfill is still catching up. */}
-          {hidden > 0 && (
-            <Button variant="subtle" size="compact-xs" onClick={showEarlier}>
-              Show earlier messages ({hidden})
-            </Button>
-          )}
-          {/* `display: contents` keeps each row a direct child of the Stack for
-              layout, while giving a search jump something to find by key. */}
-          {visibleItems.map((item) => (
-            <div key={item.key} data-item-key={item.key} style={{ display: 'contents' }}>
-              <Item
-                item={item}
-                sessionId={sessionId}
-                onImage={setLightbox}
-                renderNested={renderNested}
-                retryKey={retryKey}
-                activeGroupKey={activeGroupKey}
-                activeTurnKey={activeTurnKey}
-                liveCompactKey={liveCompactKey}
-              />
-            </div>
-          ))}
-          {showActivity && (
-            <ActivityRow startedAt={activityStartedAt} live={live} lastEventAt={lastEventAt} />
-          )}
-        </Stack>
+        <TranscriptAnchorContext.Provider value={keepInView}>
+          <Stack gap="sm" py="md" maw={920} mx="auto" ref={contentRef}>
+            {items.length === 0 && (
+              <Text size="sm" c="dimmed" ta="center" pt="xl">
+                Send a prompt to start.
+              </Text>
+            )}
+            {/* Truthful about the clipping, and the only affordance a keyboard user
+                has while the idle backfill is still catching up. */}
+            {hidden > 0 && (
+              <Button variant="subtle" size="compact-xs" onClick={showEarlier}>
+                Show earlier messages ({hidden})
+              </Button>
+            )}
+            {/* `display: contents` keeps each row a direct child of the Stack for
+                layout, while giving a search jump something to find by key. */}
+            {visibleItems.map((item) => (
+              <div key={item.key} data-item-key={item.key} style={{ display: 'contents' }}>
+                <Item
+                  item={item}
+                  sessionId={sessionId}
+                  onImage={setLightbox}
+                  renderNested={renderNested}
+                  retryKey={retryKey}
+                  activeGroupKey={activeGroupKey}
+                  activeTurnKey={activeTurnKey}
+                  liveCompactKey={liveCompactKey}
+                />
+              </div>
+            ))}
+            {showActivity && (
+              <ActivityRow startedAt={activityStartedAt} live={live} lastEventAt={lastEventAt} />
+            )}
+          </Stack>
+        </TranscriptAnchorContext.Provider>
       </ScrollArea>
       {hasNewContent && (
         <Button

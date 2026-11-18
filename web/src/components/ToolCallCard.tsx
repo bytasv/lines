@@ -1,4 +1,4 @@
-import { lazy, memo, Suspense, useState, type ReactNode } from 'react';
+import { lazy, memo, Suspense, useMemo, useState, type ReactNode } from 'react';
 import {
   ActionIcon,
   Badge,
@@ -19,11 +19,19 @@ import {
   IconZoomScan,
 } from '@tabler/icons-react';
 import type { ToolBlock, ToolGroupItem, TranscriptItem } from '../lib/transcript';
-import { groupSummary, isEditTool, isQuestionTool, toolDiff } from '../lib/transcript';
+import {
+  groupSummary,
+  isEditTool,
+  isProposalTool,
+  isQuestionTool,
+  parseProposalInput,
+  toolDiff,
+} from '../lib/transcript';
 import { isAgentTool } from '../lib/agents';
 import { BODY_CAP, toolFields, toolSummary, type ToolField } from '../lib/toolFields';
 import { QuestionReview } from './QuestionPrompt';
 import { TaskBody, TaskHeader } from './TaskCall';
+import { UiProposal } from './UiProposal';
 
 // Lazy, and mounted only while open: a transcript can hold hundreds of edit
 // tool cards, and a static import would pull Monaco into the entry chunk for
@@ -147,6 +155,11 @@ export const ToolCallCard = memo(function ToolCallCard({
   renderNested?: (items: TranscriptItem[]) => ReactNode;
 }) {
   const [expanded, setExpanded] = useState(() => stickyExpanded.get(tool.id) ?? false);
+  // Parsed once per input: the card it feeds tokenizes every version's HTML.
+  const proposal = useMemo(
+    () => (isProposalTool(tool.name) ? parseProposalInput(tool.input) : null),
+    [tool.name, tool.input],
+  );
   const [diffOpen, setDiffOpen] = useState(false);
 
   const toggle = () =>
@@ -190,6 +203,13 @@ export const ToolCallCard = memo(function ToolCallCard({
   ) {
     return <QuestionReview input={tool.input} result={tool.result} />;
   }
+
+  // A UI proposal renders as its card pending or settled, so the frames are not
+  // swapped and remounted when the result lands — and while pending it is where
+  // the user answers the call's always-ask card (see UiProposal). A dismissal or
+  // an error reads in the card's footer, under the mocks. Input that does not
+  // parse (still streaming, or malformed) stays a row rather than vanishing.
+  if (proposal) return <UiProposal tool={tool} proposal={proposal} />;
 
   return (
     <Box className={isAgent ? 'tx-task' : undefined}>

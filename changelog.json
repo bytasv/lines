@@ -1,6 +1,16 @@
 {
   "web": [
     {
+      "version": "0.1.44",
+      "date": "2026-11-18",
+      "items": [
+        {
+          "text": "When Claude offers UI options, they now appear as rendered mockups in the chat: switch between Focus and Compare, ask for changes to one version, step back to an earlier revision, and choose the one you want.",
+          "image": "web-0.1.44-ui-proposals.png"
+        }
+      ]
+    },
+    {
       "version": "0.1.43",
       "date": "2026-11-18",
       "items": [
@@ -472,5 +482,10 @@
       ]
     }
   ],
-  "desktopPending": []
+  "desktopPending": [
+    {
+      "text": "Claude can show you UI options as live mockups while it plans and wait for your pick, so the plan shows the design you chose above its text.",
+      "image": "desktop-next-plan-chosen-design.png"
+    }
+  ]
 }

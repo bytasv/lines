@@ -30,6 +30,7 @@ import { MOD } from '../lib/platform';
 import { saveFile, useFileContent, useMediaUrl } from '../lib/files';
 import { hasRenderedPreview, isHtmlPath, languageFor, mediaKindFor, type MediaKind } from '../lib/language';
 import { Markdown } from './Markdown';
+import { HtmlFrame } from './HtmlFrame';
 
 function FileTab({ path, project, active }: { path: string; project: string; active: boolean }) {
   const setActiveFileTab = useStore((s) => s.setActiveFileTab);
@@ -238,69 +239,6 @@ function MediaView({ path, kind }: { path: string; kind: MediaKind }) {
   );
 }
 
-/** Sandbox flags for the HTML preview frame. Never add `allow-same-origin`: with
- * `allow-scripts` it lets the page lift its own sandbox and reach the app. */
-const HTML_PREVIEW_SANDBOX = 'allow-scripts allow-popups allow-forms allow-modals';
-
-/** How long the shell gets to say it is ready before the frame counts as blank. */
-const HTML_PREVIEW_READY_MS = 3000;
-
-/**
- * An HTML file, rendered with its scripts running. The frame loads the static
- * `/html-preview.html` shell, whose own CSP puts it in an opaque-origin sandbox
- * (deploy/docker/web-nginx.conf, desktop/src/main.ts), and the page is handed to
- * it by postMessage, so it never goes through a server. Only the shell's ready
- * message from this frame is answered, and only once. Relative assets and links
- * do not resolve: there is no file URL behind the page.
- */
-function HtmlPreview({ path, html }: { path: string; html: string }) {
-  const frameRef = useRef<HTMLIFrameElement>(null);
-  const [ready, setReady] = useState(false);
-  const [stalled, setStalled] = useState(false);
-
-  useEffect(() => {
-    let sent = false;
-    const onMessage = (event: MessageEvent) => {
-      const frame = frameRef.current?.contentWindow;
-      if (sent || !frame || event.source !== frame) return;
-      if ((event.data as { type?: unknown } | null)?.type !== 'lines-html-preview-ready') return;
-      sent = true;
-      setReady(true);
-      // '*': the shell's origin is opaque, so there is no name to target. The
-      // source check above is what pins the message to this frame.
-      frame.postMessage({ type: 'lines-html-preview', html }, '*');
-    };
-    window.addEventListener('message', onMessage);
-    return () => window.removeEventListener('message', onMessage);
-  }, [html]);
-
-  // An old desktop build or web image has no shell route: the SPA fallback is
-  // refused as a frame, and nothing ever says it is ready.
-  useEffect(() => {
-    if (ready) return;
-    const timer = setTimeout(() => setStalled(true), HTML_PREVIEW_READY_MS);
-    return () => clearTimeout(timer);
-  }, [ready]);
-
-  return (
-    <Box pos="relative" h="100%">
-      <iframe
-        ref={frameRef}
-        src="/html-preview.html"
-        title={path}
-        sandbox={HTML_PREVIEW_SANDBOX}
-        referrerPolicy="no-referrer"
-        style={MEDIA_FILL}
-      />
-      {stalled && !ready && (
-        <Alert color="yellow" m="xs" pos="absolute" top={0} left={0} right={0}>
-          Preview unavailable — update Lines or use Raw.
-        </Alert>
-      )}
-    </Box>
-  );
-}
-
 /**
  * A workspace file: the browser's own rendering for media (read-only), rendered
  * markdown or HTML when `mode` is `'preview'`, Monaco otherwise — editable on your own
@@ -453,7 +391,7 @@ function TextContentView({
   const text = draft ?? base;
   const body =
     mode === 'preview' && isHtmlPath(path) ? (
-      <HtmlPreview path={path} html={text} />
+      <HtmlFrame title={path} html={text} />
     ) : mode === 'preview' ? (
       <ScrollArea h="100%" type="hover">
         <Box className="docs-body" px="lg" pb="xl">

@@ -30,8 +30,13 @@ in a floating palette.
   — `FileContentView`, the viewer (and editor) a hit opens in; `useMarkdownMode`
   and `MarkdownModeToggle` for the Preview/Raw header toggle
 - `web/src/lib/language.ts` — `isMarkdownPath`, `isHtmlPath`, `hasRenderedPreview`
+- `web/src/components/HtmlFrame.tsx` — `HtmlFrame`, the frame that hands a page to the shell.
+  It moved here from `FilesView.tsx` with the same handshake, source check, stall hint and
+  sandbox flags. Its optional `onContentHeight` gets the page's own height from the shell's
+  `lines-html-preview-size` message, which transcript UI proposals use to size their frames; a
+  shell without that message keeps the caller's fallback height.
 - `web/public/html-preview.html`, `web/public/html-preview.js` — the sandboxed shell
-  `HtmlPreview` frames
+  `HtmlFrame` frames
 - `deploy/docker/web-nginx.conf`, `desktop/src/main.ts` — the shell's response policy
   (hosted and desktop local mode)
 - `web/src/components/Markdown.tsx` — renders the Preview body
@@ -47,7 +52,7 @@ in a floating palette.
   `searchFiles`/`searchFilesAcross`
 - `TreeEntry.ignored`
 - `isMarkdownPath`, `isHtmlPath`, `hasRenderedPreview`, `FileContentView`, `useMarkdownMode`,
-  `HtmlPreview`
+  `HtmlFrame`
 - `FileActionsSlot` — the header spot a host gives the open file's save
   controls
 

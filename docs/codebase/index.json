@@ -216,7 +216,8 @@
         "server/src/guestWorkflows.ts",
         "web/src/lib/can.ts",
         "server/src/planSideChat.ts",
-        "web/src/components/PlanChat.tsx"
+        "web/src/components/PlanChat.tsx",
+        "web/src/components/UiProposal.tsx"
       ],
       "symbols": [
         "PermissionMode",
@@ -301,7 +302,10 @@
         "askPlanChat",
         "PlanChat",
         "PlanChatEventData",
-        "runPlanChatTurn"
+        "runPlanChatTurn",
+        "ChosenDesigns",
+        "pickedProposals",
+        "proposalAnswers"
       ],
       "tests": [
         "server/src/autoGuard.plan.test.ts",
@@ -379,7 +383,9 @@
         "asking a plan side-chat question requires prompt and approvePermissions, and no promptNeedsApproval; history stays readable after the card resolves",
         "resolving the card aborts an in-flight plan side-chat question",
         "plan side-chat partial answers are broadcast only and never persisted; the final answer is the saved record",
-        "plan side-chat is Claude-only; the planSideChat capability is false for codex"
+        "plan side-chat is Claude-only; the planSideChat capability is false for codex",
+        "propose_ui is always-ask: no mode, guard or allowlist auto-allows it, and a restart or interrupt never expires its card",
+        "the plan card shows the design picked on a propose_ui card earlier in the session (the latest pick per title, before the plan's own request)"
       ],
       "architecturalRules": [
         "single shared PERMISSION_MODES list — no component defines its own label/description array; PERMISSION_MODE_SEGMENTS is a three-item, independently-ordered subset (plan, auto, bypassPermissions) built by mapping over that subset, not by filtering PERMISSION_MODES",
@@ -1392,7 +1398,8 @@
         "web/src/components/Transcript.tsx",
         "web/src/components/ToolCallCard.tsx",
         "web/src/lib/transcript.ts",
-        "server/src/sessions.ts"
+        "server/src/sessions.ts",
+        "web/src/components/UiProposal.tsx"
       ],
       "files": [
         "web/src/components/Transcript.tsx",
@@ -1411,7 +1418,13 @@
         "web/src/lib/workflowReveal.ts",
         "web/src/lib/format.ts",
         "web/src/components/MarkdownImage.tsx",
-        "web/src/lib/markdownImage.ts"
+        "web/src/lib/markdownImage.ts",
+        "web/src/components/UiProposal.tsx",
+        "web/src/components/HtmlFrame.tsx",
+        "web/src/lib/transcriptAnchor.ts",
+        "web/src/lib/appTokens.ts",
+        "web/public/html-preview.html",
+        "web/public/html-preview.js"
       ],
       "symbols": [
         "Markdown",
@@ -1447,7 +1460,19 @@
         "foldAgentTurns",
         "TaskItem",
         "ToolBlock.background",
-        "markdownLinkPath"
+        "markdownLinkPath",
+        "UiProposal",
+        "ProposalPermission",
+        "ChosenDesigns",
+        "HtmlFrame",
+        "withAppTokens",
+        "readAppTokens",
+        "isProposalTool",
+        "parseProposalInput",
+        "proposalOutcome",
+        "pickedProposals",
+        "TranscriptAnchorContext",
+        "proposalUpdating"
       ],
       "tests": [
         "server/src/sessions.turns.test.ts",
@@ -1487,7 +1512,10 @@
         "a successful turn's cost and duration render as chips on the turn's header (Compact level) rather than their own centered row; a turn with no header card (text-only, or Full/Grouped level) shows them as a small right-aligned dimmed meta line instead — a failed, stopped, or recovering turn keeps its centered row, error text, and Retry affordance unchanged",
         "only three workflow-marker events render in the transcript: started, a failure park (waiting-approval with failed or missingOutputs), and workflow-done; a clean park, an approve, a retry, and an interrupt leave no transcript trace since the stepper and the approve card already show that state live, and the emitted/stored event set is unchanged",
         "buildTranscript may see a suffix-only event list until paged backfill completes; cross-turn derivations (CostLineage, sessionPlanWrite fallback, lastInitModel de-duplication, background tasks opened in older history) are transient until then",
-        "'plan-chat' events attach to the ExitPlanMode permission item they name and never render as rows of their own"
+        "'plan-chat' events attach to the ExitPlanMode permission item they name and never render as rows of their own",
+        "a propose_ui call is never folded into a tool group or a turn, and stays visible until answered",
+        "a revision (revise: true with the same title) replaces versions by label in place; the earlier card folds to one line and every earlier revision of a version stays reachable",
+        "Focus keeps every version's frame mounted and stacked, so switching versions never reloads a page or changes the card's height"
       ],
       "architecturalRules": [
         "user and agent transcript text share one markdown renderer instead of separate text-rendering paths; ColorizedText.tsx deleted as dead code",
@@ -1513,7 +1541,8 @@
         "the set of requests that already auto-focused is a module-scope Set keyed by requestId, not a useRef, because Transcript windows/backfills its item list and this component can genuinely remount for a still-pending request",
         "the mouse and keyboard paths both fold through one advance() function; the click path passes canSubmit: false so clicking the last unanswered option can move focus but never itself fires the WS send",
         "markdown images are placeholders because an image fetches on render with nobody clicking, so a prompt-injected agent could exfiltrate data just by writing an image URL; links wait for a click and are left alone; the deployed CSP is now enforcing and its img-src admits no arbitrary host, the same channel closed one layer down (see production-deployment)",
-        "markdownImageTarget is pure (web/src/lib, no React) so the server's test runner covers it; a protocol-relative //host URL is classed as remote via isExternalHref, never as a local path"
+        "markdownImageTarget is pure (web/src/lib, no React) so the server's test runner covers it; a protocol-relative //host URL is classed as remote via isExternalHref, never as a local path",
+        "proposal frames reuse the file preview's sandboxed shell (/html-preview.html); the CSP and sandbox are unchanged for transcript mocks"
       ],
       "relatedDecisions": [
         "session-collaboration",
@@ -2098,7 +2127,12 @@
         "StepView",
         "stepView",
         "createdAtOf",
-        "earliest"
+        "earliest",
+        "proposalAnswers",
+        "proposalAnswerText",
+        "earlierProposalLabels",
+        "proposalError",
+        "PROPOSE_UI_TOOL"
       ],
       "tests": [
         "server/src/workerMcp.test.ts",
@@ -2122,7 +2156,9 @@
         "a workflow's createdAt is stamped once on first save and never restamped; a fresh (empty) id always mints a new one, so duplicate()/create_workflow can never inherit the source's birthday",
         "a step's createdAt is the lineage's creation, not the mint time of the version being read; every version of one step reports the same createdAt, and that version's own mint time is its updatedAt",
         "creation time only ever moves earlier, never later, everywhere it merges (earliest/LEAST) — idempotent and order-independent across peers, so a client or blob that omits createdAt can never erase a known one",
-        "a write runs only where an approval card gated it: the codex door (POST /lines-mcp) has no card on its path, so it serves LINES_READ_ONLY_MANIFEST and dispatches with allowWrites: false, while the Claude door keeps every write behind its card (allowWrites: true)"
+        "a write runs only where an approval card gated it: the codex door (POST /lines-mcp) has no card on its path, so it serves LINES_READ_ONLY_MANIFEST and dispatches with allowWrites: false, while the Claude door keeps every write behind its card (allowWrites: true)",
+        "propose_ui is served on both doors and is read-only, but its answer exists only where a card gates it: the Claude door always raises that card, and the codex door's call returns at once with no answer",
+        "propose_ui's answer field is written only by the user's card; whatever the agent sends there is replaced, and a choice must name one of the call's labels (or one from an earlier revision with the same title)"
       ],
       "architecturalRules": [
         "tool names/descriptions/schemas live entirely on the bridge (mcpWorkflowTools.ts) and are hot-reloadable; only the workflow-agnostic conversion (workerMcp.ts) and protocol shape (workerProtocol.ts) sit in the worker's minimal import graph",
@@ -3881,7 +3917,8 @@
         "web/public/html-preview.html",
         "web/public/html-preview.js",
         "deploy/docker/web-nginx.conf",
-        "desktop/src/main.ts"
+        "desktop/src/main.ts",
+        "web/src/components/HtmlFrame.tsx"
       ],
       "symbols": [
         "FilePalette",
@@ -3897,7 +3934,7 @@
         "FileActionsSlot",
         "isHtmlPath",
         "hasRenderedPreview",
-        "HtmlPreview"
+        "HtmlFrame"
       ],
       "tests": [
         "server/src/fileSearch.test.ts",

@@ -73,6 +73,7 @@ import {
   providerSwitchBlock,
   providerSwitchNeedsFreshStart,
   resolveModelId,
+  PROPOSE_UI_TOOL,
   resultErrorText,
   resultUsage,
   rewindBlock,
@@ -118,6 +119,10 @@ import {
   isLinesMcpTool,
   isReadOnlyLinesTool,
   LINES_TOOL_MANIFEST,
+  earlierProposalLabels,
+  proposalAnswerText,
+  proposalAnswers,
+  proposalError,
 } from './mcpWorkflowTools.ts';
 import type { McpConnections } from './mcpConnections.ts';
 import { vetMcpUrl } from './mcpVetting.ts';
@@ -615,6 +620,11 @@ export function questionAnswers(
   return Object.keys(out).length ? out : undefined;
 }
 
+/** A `propose_ui` card's title, for the prose that reports its answer. */
+function proposalTitle(input: Record<string, unknown> | undefined): string {
+  return typeof input?.title === 'string' ? input.title.trim() : '';
+}
+
 /** Tools whose write to a plan file can carry a plan-mode deliverable. */
 const PLAN_WRITE_TOOLS = new Set(['Write', 'Edit']);
 
@@ -1018,6 +1028,9 @@ export function retryGestureText(toolName: string, d: PermissionRequestData): st
     // Already model-ready: a refine carries KEEP_PLANNING_MESSAGE plus the notes.
     const message = d.denyMessage?.trim();
     return message ? `${RETRY_GESTURE_PREAMBLE}\n\n${message}` : null;
+  }
+  if (toolName === PROPOSE_UI_TOOL && d.answers && Object.keys(d.answers).length) {
+    return `${RETRY_GESTURE_PREAMBLE}\n\n${proposalAnswerText(proposalTitle(d.input), d.answers)}`;
   }
   if (toolName === 'AskUserQuestion' && d.answers && Object.keys(d.answers).length) {
     // Same rendering recoverOrphanedPermission uses for the same stored shape.
@@ -4718,6 +4731,21 @@ export class SessionManager {
    * event, which carries an empty one — except for an MCP elicitation, which is
    * a request with no tool at all and is identified by its `elicitation` field.
    */
+  /**
+   * The inputs of the `propose_ui` cards raised before `requestId`, oldest
+   * first: what a revision's merged set is built from (earlierProposalLabels).
+   */
+  private earlierProposalInputs(sessionId: string, requestId: string): Record<string, unknown>[] {
+    const out: Record<string, unknown>[] = [];
+    for (const event of this.store.loadTranscript(sessionId)) {
+      if (event.kind !== 'permission') continue;
+      const data = event.data as PermissionRequestData;
+      if (data.requestId === requestId) break;
+      if (data.toolName === PROPOSE_UI_TOOL) out.push(data.input);
+    }
+    return out;
+  }
+
   private findPermissionRequest(sessionId: string, requestId: string): PermissionRequestData | null {
     for (const event of this.store.loadTranscript(sessionId)) {
       if (event.kind !== 'permission') continue;
@@ -5034,6 +5062,10 @@ export class SessionManager {
           'I approved your plan (the session was interrupted before the approval reached you). ' +
           'Proceed with the implementation now.';
       }
+    } else if (original.toolName === PROPOSE_UI_TOOL && allow && answers) {
+      text =
+        'You showed me UI mocks, but the session was interrupted before my answer reached you.\n' +
+        proposalAnswerText(proposalTitle(original.input), answers);
     } else if (original.toolName === 'AskUserQuestion' && allow && answers) {
       const lines = Object.entries(answers).map(([q, a]) => `- ${q}\n  Answer: ${a}`);
       text =
@@ -5484,12 +5516,28 @@ export class SessionManager {
     // back as `rm -rf ~` — whoever holds `approvePermissions` approves the call
     // that was asked about, not one of their choosing.
     const asked = this.findPermissionRequest(sessionId, requestId);
-    const answered =
-      allow && asked?.toolName === 'AskUserQuestion'
+    const proposal = asked?.toolName === PROPOSE_UI_TOOL;
+    const answered = !allow
+      ? undefined
+      : asked?.toolName === 'AskUserQuestion'
         ? questionAnswers(asked.input, answers ?? (updatedInput?.answers as Record<string, unknown> | undefined))
-        : undefined;
+        : proposal && asked
+          ? proposalAnswers(
+              asked.input,
+              answers ?? updatedInput?.answer,
+              earlierProposalLabels(asked.input, this.earlierProposalInputs(sessionId, requestId)),
+            )
+          : undefined;
     answers = answered;
-    updatedInput = answered && asked ? { ...asked.input, answers: answered } : undefined;
+    // A proposal's answer replaces whatever `answer` the agent put on its own input.
+    updatedInput =
+      answered && asked
+        ? proposal
+          ? { ...asked.input, answer: answered }
+          : { ...asked.input, answers: answered }
+        : undefined;
+    // An allow on a proposal with no usable pick has nothing to tell the agent.
+    if (proposal && allow && !answered) return;
 
     // Persist the exception first so it also covers the recovery path. What is
     // saved is exactly what the card showed (`alwaysAllowEntry`, recorded when it
@@ -5592,7 +5640,9 @@ export class SessionManager {
       resolvedBy,
       ...(actor ? { resolvedActor: actor } : {}),
       answers,
-      updatedInput,
+      // Not for a proposal: it would repeat every version's HTML, and `answers`
+      // alone rebuilds it on a re-send (see handleCanUseTool).
+      ...(proposal ? {} : { updatedInput }),
       denyMessage: allow ? undefined : denyMessage,
     } satisfies PermissionRequestData);
     this.logResolution(
@@ -7417,8 +7467,9 @@ export class SessionManager {
     // Lines' own workflow tools are gated by what they do, not by the session's
     // mode: reads never prompt, writes always do. A workflow edit outlives the
     // session that made it and shows up in other users' shared views, so it is
-    // not something auto mode should be rubber-stamping.
-    if (isLinesMcpTool(toolName)) {
+    // not something auto mode should be rubber-stamping. The always-ask one
+    // (propose_ui) is left to the always-ask branch below.
+    if (isLinesMcpTool(toolName) && !ALWAYS_ASK_TOOLS.has(toolName)) {
       if (!isReadOnlyLinesTool(toolName)) {
         return {
           continue: true,
@@ -7595,7 +7646,10 @@ export class SessionManager {
         return resolved.resolution === 'allow'
           ? {
               behavior: 'allow',
-              updatedInput: resolved.updatedInput ?? input,
+              updatedInput:
+                toolName === PROPOSE_UI_TOOL && resolved.answers
+                  ? { ...input, answer: resolved.answers }
+                  : (resolved.updatedInput ?? input),
               // Without this a codex question re-delivered after a bridge restart
               // would be answered 'allow' with no answers in it, which reads to the
               // model as the user declining to answer.
@@ -7617,9 +7671,16 @@ export class SessionManager {
     // (recorded in the transcript); dangerous -> fall through to the prompt
     // with the guard's reason attached.
     let guardReason: string | undefined;
+    // A malformed proposal gets no card the browser could not render: let it
+    // through so the dispatcher answers with the reason.
+    if (toolName === PROPOSE_UI_TOOL && proposalError(input)) {
+      return { behavior: 'allow', updatedInput: input };
+    }
     // Lines' own workflow tools bypass the guard entirely (see handlePreToolUse):
-    // reads auto-allow in every mode, writes always reach the card below.
-    if (isLinesMcpTool(toolName)) {
+    // reads auto-allow in every mode, writes always reach the card below. The
+    // always-ask one (propose_ui, whose card is the user's pick) falls through to
+    // it like AskUserQuestion.
+    if (isLinesMcpTool(toolName) && !ALWAYS_ASK_TOOLS.has(toolName)) {
       if (isReadOnlyLinesTool(toolName)) {
         this.recordAutoAllow(sessionId, toolName, input, resend);
         return { behavior: 'allow', updatedInput: input };

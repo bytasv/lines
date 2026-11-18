@@ -247,6 +247,11 @@ are tagged with the pushed commit SHA).
   hash at all — same-origin `script-src` is what still gates them. Deliberate: bundling Monaco into
   the entry chunk delayed first paint on every screen, including ones with no editor on them.
 
+The same shell is also used for the mocks in transcript UI proposals (`HtmlFrame`, see
+[transcript-rendering](transcript-rendering.md)). It reports the page's height with a
+`lines-html-preview-size` message. No policy changes: the CSP, the sandbox and the nginx and
+Electron exceptions are the same as for the file preview.
+
 ### Storage hardening
 
 - Every table has row level security on, with no policies, and not forced

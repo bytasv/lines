@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Box, Group, Text } from '@mantine/core';
+import { PROPOSE_UI_TOOL } from '@lines/shared';
 import { agentMeta, MAIN_AGENT_META } from '../lib/agents';
 import type { LiveActivity } from '../lib/transcript';
 
@@ -19,6 +20,8 @@ function label(live: LiveActivity | null): string {
         const kb = live.inputBytes && live.inputBytes >= 2048 ? ` · ${Math.round(live.inputBytes / 1024)}kB` : '';
         return `Writing plan…${kb}`;
       }
+      // Lines' own mock tool reads as what it is doing, not as its MCP name.
+      if (live.toolName === PROPOSE_UI_TOOL) return 'Drawing UI mocks…';
       return `Preparing ${live.toolName ?? 'tool'}…`;
     }
     default:

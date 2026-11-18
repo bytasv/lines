@@ -93,8 +93,9 @@ test('the manifest is what the read/write classification is derived from', () =>
   for (const spec of LINES_TOOL_MANIFEST.tools) {
     assert.equal(isLinesMcpTool(`mcp__lines__${spec.name}`), true, spec.name);
     assert.equal(isReadOnlyLinesTool(`mcp__lines__${spec.name}`), spec.readOnly === true, spec.name);
-    // Read tools are the list_*/get_* half; every other tool mutates.
-    assert.equal(spec.readOnly === true, /^(list|get)_/.test(spec.name), spec.name);
+    // Read tools are the list_*/get_* half, plus propose_ui: it shows mocks and
+    // writes nothing, but its answer is gated by a card on the Claude path.
+    assert.equal(spec.readOnly === true, /^(list|get)_/.test(spec.name) || spec.name === 'propose_ui', spec.name);
   }
   assert.equal(isLinesMcpTool('Bash'), false);
   assert.equal(isLinesMcpTool('mcp__lines__nope'), false, 'not in the manifest');

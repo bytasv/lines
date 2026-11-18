@@ -1,7 +1,9 @@
 <!doctype html>
 <!--
-  Shell for the file viewer's HTML preview (HtmlPreview in
-  web/src/components/FilesView.tsx). Served with its own CSP, whose `sandbox`
+  Shell for agent-written HTML: the file viewer's HTML preview and the UI
+  proposal cards in the transcript (HtmlFrame in web/src/components/HtmlFrame.tsx).
+  After writing the page it posts the page's height back, for frames sized to
+  their content. Served with its own CSP, whose `sandbox`
   directive gives it an opaque origin: the agent-written page it is replaced
   with can run scripts and load assets, but cannot reach the app's storage,
   DOM, cookies or connection. The page arrives by postMessage, never from a server.

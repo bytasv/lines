@@ -133,6 +133,61 @@ const PROPOSED_TRANSPORT: JsonSchemaNode = {
   description: "'http' for a streamable-HTTP endpoint (the usual one), 'sse' for a legacy SSE one.",
 };
 
+/**
+ * Limits on `propose_ui`. Its payload rides transcript events, history paging and
+ * end-to-end encryption, and stays in the agent's context, so the HTML is capped
+ * per version and per call (measured in UTF-8 bytes).
+ */
+export const PROPOSAL_MIN_VERSIONS = 1;
+export const PROPOSAL_MAX_VERSIONS = 4;
+export const PROPOSAL_MAX_VERSION_BYTES = 200_000;
+export const PROPOSAL_MAX_TOTAL_BYTES = 600_000;
+
+/**
+ * `propose_ui`'s description: what the frame offers is the same on both paths,
+ * and `flow` says how the pick comes back — waited for on the Claude path (its
+ * card is always-ask, see sessions.ts), a later chat message on codex's.
+ */
+function proposeUiDescription(flow: string): string {
+  return (
+    'Show the user one to four versions of a UI side by side in the chat, as rendered HTML, so they can compare them and pick one — without opening the app. ' +
+    "Each `html` is a fragment or a full document rendered in a sandboxed frame with the app's design tokens already injected: " +
+    '`var(--mantine-color-*)` (e.g. --mantine-color-body, --mantine-color-text, --mantine-color-dimmed, --mantine-color-default-border, --mantine-color-blue-6), ' +
+    '`--mantine-spacing-*`, `--mantine-radius-*`, `--mantine-font-size-*` and `--mantine-font-family`; the body background, text colour and font are already set, ' +
+    'and `data-mantine-color-scheme` is on `<html>`. ' +
+    'Aim for a quick, approximate mock: use the tokens for colour, type, spacing and radius, and do not rebuild Mantine components faithfully or read component source just to match them. ' +
+    'Inline everything — no network is needed and relative URLs do not resolve. ' +
+    `Each version is capped at ${Math.round(PROPOSAL_MAX_VERSION_BYTES / 1000)} KB of HTML and the call at ${Math.round(PROPOSAL_MAX_TOTAL_BYTES / 1000)} KB. ` +
+    flow
+  );
+}
+
+const PROPOSAL_REVISE: JsonSchemaNode = {
+  type: 'boolean',
+  description:
+    'Update the previous proposal with this exact `title` in place instead of starting a new set: pass only the versions you changed, under their existing labels (a new label adds a version). The user keeps comparing the whole set, with the changed versions swapped in. Use it after the user asks for changes.',
+};
+
+/**
+ * Where the user's answer rides back into the call. It has to be in the schema:
+ * the worker builds a Zod object from it, which strips any key it does not
+ * name, so an answer resolvePermission put on the input would never reach the
+ * dispatcher. Whatever the agent sends here is replaced by the card's answer
+ * (resolvePermission rebuilds it), and the codex manifest drops it.
+ */
+const PROPOSAL_ANSWER: JsonSchemaNode = {
+  type: 'object',
+  description: "Never set this — Lines fills it in with the user's answer from the card.",
+  properties: {
+    choice: { type: 'string' },
+    note: { type: 'string' },
+    feedback: { type: 'string' },
+    version: { type: 'string' },
+    // Must be named here too, or the worker's Zod object strips it.
+    revision: { type: 'string' },
+  },
+};
+
 const READ_TOOLS: McpToolSpec[] = [
   {
     name: 'list_workflows',
@@ -189,6 +244,37 @@ const READ_TOOLS: McpToolSpec[] = [
       "The MCP servers this user has added, with their transport, URL, whether they are on, and this session's connection status where one is known. Call this whenever a task needs a third-party service you have no tools for — including when a fetch of that service's page came back as a sign-in wall or an empty JavaScript shell, which is what a missing connection looks like from the outside. It tells you whether the server is missing, switched off, or connected but not authorized.",
     readOnly: true,
     inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'propose_ui',
+    description: proposeUiDescription(
+      'The call waits while the user compares them, then returns the version they picked (with an optional note) or the changes they asked for instead. ' +
+        'Use it whenever a visual choice is open — including in plan mode, to settle the design before writing the plan; write the chosen version into the plan rather than proposing it there. ' +
+        'To act on requested changes, call it again with the same `title` and `revise: true`, passing only the versions you changed: the card replaces them in place in the set the user is already comparing.',
+    ),
+    readOnly: true,
+    inputSchema: {
+      type: 'object',
+      required: ['title', 'versions'],
+      properties: {
+        title: { type: 'string', description: 'What is being proposed, e.g. "Prompt area".' },
+        versions: {
+          type: 'array',
+          description: `${PROPOSAL_MIN_VERSIONS}-${PROPOSAL_MAX_VERSIONS} versions, shown as tabs in this order.`,
+          items: {
+            type: 'object',
+            required: ['label', 'html'],
+            properties: {
+              label: { type: 'string', description: 'Short unique tab label, e.g. "A" or "Quiet chips".' },
+              html: { type: 'string', description: 'The mock: an HTML fragment or a full document.' },
+              notes: { type: 'string', description: 'Optional one or two lines on what this version changes.' },
+            },
+          },
+        },
+        revise: PROPOSAL_REVISE,
+        answer: PROPOSAL_ANSWER,
+      },
+    },
   },
 ];
 
@@ -285,6 +371,20 @@ const WRITE_TOOLS: McpToolSpec[] = [
   },
 ];
 
+/** The sentence each manifest carries about `propose_ui`, matching how its pick comes back. */
+// Worded against AskUserQuestion on purpose: that is the built-in the model
+// reaches for when a choice is open, and Claude Code may defer this tool behind
+// ToolSearch, so these instructions are often all the model sees of it.
+const PROPOSE_UI_INSTRUCTION =
+  'UI choices: when the user asks for UI or design options, or a plan has a visual decision open (layout, styling, ' +
+  'look of a component or screen), show the candidates as rendered mocks with mcp__lines__propose_ui instead of ' +
+  'describing them in text or offering them through AskUserQuestion — the user picks from what they see. It waits ' +
+  "for the user's pick and returns it, and it works in plan mode: call it while planning, then write the chosen " +
+  'version into the plan. Keep AskUserQuestion for choices that are not visual.';
+const PROPOSE_UI_INSTRUCTION_NO_WAIT =
+  'When the user asks to see UI options or a design change before it is built, show them with propose_ui ' +
+  "(rendered HTML mocks in the app's palette), then end your turn and wait for them to accept one or reply before editing code.";
+
 export const LINES_TOOL_MANIFEST: McpToolManifest = {
   serverName: LINES_MCP_SERVER,
   instructions:
@@ -293,7 +393,8 @@ export const LINES_TOOL_MANIFEST: McpToolManifest = {
     'Read before writing (list_workflows, then get_workflow), and send `steps` back whole — it replaces the list. ' +
     'Every write asks the user for approval, so make one deliberate call rather than a series of guesses. ' +
     'The mcp_connection tools cover the third-party MCP servers this user has added: when a task needs tools ' +
-    'you cannot see, check list_mcp_connections before telling the user it cannot be done.',
+    'you cannot see, check list_mcp_connections before telling the user it cannot be done. ' +
+    PROPOSE_UI_INSTRUCTION,
   tools: [...READ_TOOLS, ...WRITE_TOOLS],
 };
 
@@ -315,8 +416,26 @@ export const LINES_READ_ONLY_MANIFEST: McpToolManifest = {
     'Use these tools when the user wants to see their own workflows and reusable steps. They are read-only here: ' +
     'to change a workflow, a step or a connection, tell the user what to change and they will do it in Lines. ' +
     'list_mcp_connections covers the third-party MCP servers this user has added: when a task needs tools ' +
-    'you cannot see, check it before telling the user it cannot be done.',
-  tools: READ_TOOLS,
+    'you cannot see, check it before telling the user it cannot be done. ' +
+    PROPOSE_UI_INSTRUCTION_NO_WAIT,
+  // Same tools; only propose_ui's wording differs, since nothing here waits on a card.
+  tools: READ_TOOLS.map((t) =>
+    t.name === 'propose_ui'
+      ? {
+          ...t,
+          // No card here, so no answer to carry.
+          inputSchema: {
+            ...t.inputSchema,
+            properties: Object.fromEntries(
+              Object.entries(t.inputSchema.properties ?? {}).filter(([key]) => key !== 'answer'),
+            ),
+          },
+          description: proposeUiDescription(
+            'The call returns at once: after it, end your turn and wait for the user to accept a version or reply before editing any code. To act on requested changes, call it again with the same `title` and `revise: true`, passing only the versions you changed.',
+          ),
+        }
+      : t,
+  ),
 };
 
 /**
@@ -516,6 +635,172 @@ function connectionView(
 }
 
 /**
+ * Why a `propose_ui` call would be refused, or null when it is well-formed. The
+ * session checks this before raising the card, so a malformed call goes straight
+ * to the dispatcher's error instead of a card the browser cannot render.
+ */
+export function proposalError(args: Record<string, unknown>): string | null {
+  const checked = checkProposal(args);
+  return 'error' in checked ? checked.error : null;
+}
+
+/** A `propose_ui` call's version labels, or the first reason it is refused. */
+function checkProposal(args: Record<string, unknown>): { labels: string[] } | { error: string } {
+  if (!str(args.title).trim()) return { error: '`title` is required: say what is being proposed.' };
+  const versions = args.versions;
+  if (!Array.isArray(versions)) return { error: '`versions` must be an array.' };
+  if (versions.length < PROPOSAL_MIN_VERSIONS || versions.length > PROPOSAL_MAX_VERSIONS) {
+    return {
+      error: `Pass between ${PROPOSAL_MIN_VERSIONS} and ${PROPOSAL_MAX_VERSIONS} versions (got ${versions.length}).`,
+    };
+  }
+  const labels: string[] = [];
+  let total = 0;
+  for (const [i, entry] of versions.entries()) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      return { error: `Version ${i + 1} is not an object.` };
+    }
+    const v = entry as Record<string, unknown>;
+    const label = str(v.label).trim();
+    if (!label) return { error: `Version ${i + 1} needs a non-empty \`label\`.` };
+    if (labels.some((l) => l.toLowerCase() === label.toLowerCase())) {
+      return { error: `Two versions are labelled "${label}" — labels must be unique.` };
+    }
+    if (typeof v.html !== 'string' || !v.html.trim()) {
+      return { error: `Version "${label}" needs its \`html\`.` };
+    }
+    if (v.notes !== undefined && typeof v.notes !== 'string') {
+      return { error: `Version "${label}": \`notes\` must be a string.` };
+    }
+    const bytes = Buffer.byteLength(v.html, 'utf8');
+    if (bytes > PROPOSAL_MAX_VERSION_BYTES) {
+      return {
+        error: `Version "${label}" is ${Math.ceil(bytes / 1000)} KB of HTML; the limit is ${PROPOSAL_MAX_VERSION_BYTES / 1000} KB per version. Make the mock smaller — it only needs to be approximate.`,
+      };
+    }
+    total += bytes;
+    labels.push(label);
+  }
+  if (total > PROPOSAL_MAX_TOTAL_BYTES) {
+    return {
+      error: `The versions add up to ${Math.ceil(total / 1000)} KB of HTML; the limit is ${PROPOSAL_MAX_TOTAL_BYTES / 1000} KB per call. Send fewer or smaller versions.`,
+    };
+  }
+  return { labels };
+}
+
+/** Characters kept of a free-text note or feedback on a proposal card. */
+const PROPOSAL_NOTE_MAX_CHARS = 4000;
+
+/**
+ * The answer to a `propose_ui` card, narrowed to what the card can say: a
+ * `choice` that is one of the call's own version labels (with an optional
+ * `note`), or `feedback` instead of a pick — about the `version` the user had
+ * selected when they asked, if it is one of the call's labels. Anything else is
+ * undefined. Used by
+ * resolvePermission on the client's answer and here on the rebuilt input.
+ */
+export function proposalAnswers(
+  input: Record<string, unknown>,
+  raw: unknown,
+  /** A `revise` call's earlier labels: the card shows the merged set, so any of them can be chosen. */
+  earlierLabels: string[] = [],
+): Record<string, string> | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const r = raw as Record<string, unknown>;
+  const clip = (v: unknown) => (typeof v === 'string' ? v.trim().slice(0, PROPOSAL_NOTE_MAX_CHARS) : '');
+  const versions = Array.isArray(input.versions) ? (input.versions as unknown[]) : [];
+  const labels = [
+    ...versions.map((v) => (v && typeof v === 'object' ? str((v as Record<string, unknown>).label).trim() : '')),
+    ...earlierLabels,
+  ];
+  const labelOf = (wanted: string) =>
+    wanted ? labels.find((l) => l && l.toLowerCase() === wanted.toLowerCase()) : undefined;
+  const choice = clip(r.choice);
+  if (choice) {
+    const label = labelOf(choice);
+    if (!label) return undefined;
+    const note = clip(r.note);
+    return { choice: label, ...(note ? { note } : {}), ...revisionOf(r.revision) };
+  }
+  const feedback = clip(r.feedback);
+  if (!feedback) return undefined;
+  const version = labelOf(clip(r.version));
+  return { feedback, ...(version ? { version, ...revisionOf(r.revision) } : {}) };
+}
+
+/**
+ * An earlier revision of a version the user went back to on the card (1 = the
+ * version as first proposed). Absent means the latest; anything that is not a
+ * small positive integer is dropped rather than guessed at.
+ */
+function revisionOf(raw: unknown): { revision?: string } {
+  const n = typeof raw === 'string' ? Number(raw) : typeof raw === 'number' ? raw : NaN;
+  return Number.isInteger(n) && n >= 1 && n <= 99 ? { revision: String(n) } : {};
+}
+
+/**
+ * The labels a `revise` call merges into: every earlier `propose_ui` input with
+ * the same title, oldest first, back to (and including) the last one that was
+ * not itself a revision. Empty for a call that is not a revision. Mirrors the
+ * web's merge (buildTranscript), which is what the user actually picks from.
+ */
+export function earlierProposalLabels(input: Record<string, unknown>, earlier: Record<string, unknown>[]): string[] {
+  if (input.revise !== true) return [];
+  const title = str(input.title).trim().toLowerCase();
+  const chain: Record<string, unknown>[] = [];
+  for (let i = earlier.length - 1; i >= 0; i--) {
+    const e = earlier[i];
+    if (str(e.title).trim().toLowerCase() !== title) continue;
+    chain.push(e);
+    if (e.revise !== true) break;
+  }
+  const out: string[] = [];
+  for (const e of chain) {
+    for (const v of Array.isArray(e.versions) ? (e.versions as unknown[]) : []) {
+      const label = v && typeof v === 'object' ? str((v as Record<string, unknown>).label).trim() : '';
+      if (label && !out.some((l) => l.toLowerCase() === label.toLowerCase())) out.push(label);
+    }
+  }
+  return out;
+}
+
+/**
+ * What the agent reads for an answered proposal — the tool result on the live
+ * path, and the recovery/retry message when the query that asked is gone. The
+ * opening words are stable: the card reads the outcome back off them
+ * (web/src/lib/transcript.ts, proposalOutcome).
+ */
+export function proposalAnswerText(title: string, answers: Record<string, string>): string {
+  const what = title ? `the UI proposal "${title}"` : 'the UI proposal';
+  // Wording read back by the card (proposalOutcome), so keep the parenthesis shape.
+  const earlier = answers.revision
+    ? ` (revision ${answers.revision} — an earlier revision of it, not your latest change)`
+    : '';
+  if (answers.choice) {
+    return (
+      `The user picked version "${answers.choice}"${earlier} of ${what}.` +
+      (answers.note ? `\nTheir note: ${answers.note}` : '') +
+      '\nUse that version: if you are planning, write it into the plan; otherwise implement it in the codebase to match.'
+    );
+  }
+  // Said as an instruction to stay on this decision: read as plain feedback, the
+  // agent took it as an answer and moved on to its next question.
+  const target = answers.version ? `version "${answers.version}"${earlier} of ${what}` : what;
+  const apply = answers.version
+    ? `Apply these changes to version "${answers.version}"` +
+      (answers.revision ? `, starting from its revision ${answers.revision} rather than the latest,` : '') +
+      ' and call propose_ui again with the same title, ' +
+      `\`revise: true\` and only the revised version "${answers.version}" (same label) — the card swaps it in place.`
+    : 'Revise the mocks and call propose_ui again with the same title, `revise: true` and only the versions you changed.';
+  return (
+    `The user asked for changes to ${target} instead of picking one:\n${answers.feedback ?? ''}\n` +
+    `${apply} If the feedback was a question, answer it first. Stay on this design decision until the user ` +
+    'picks a version: do not move on to other questions, the plan or code before then.'
+  );
+}
+
+/**
  * The tool handlers for one user, closed over their context. Built per rpc: the
  * worker's MCP server is per session, and the bridge routes each call to the
  * context that owns that session.
@@ -576,6 +861,23 @@ export function createMcpDispatcher(
         // Formatted here, not in the view: that view also answers the browser,
         // which needs the numeric timestamps.
         return ok(versions.map(commands.stepView));
+      }
+
+      case 'propose_ui': {
+        // Nothing is stored: the transcript's tool-call event is the proposal, and
+        // the card renders it from the call's input. This checks the shape, then
+        // reports the pick. On the Claude path (allowWrites — the one with cards)
+        // the always-ask card has already been answered and resolvePermission put
+        // the answer on the input; any `answer` the agent wrote itself was
+        // replaced there. Codex has no card, so it never reads one.
+        const checked = checkProposal(args);
+        if ('error' in checked) return fail(checked.error);
+        const answer = opts.allowWrites ? proposalAnswers(args, args.answer) : undefined;
+        const text = answer
+          ? proposalAnswerText(str(args.title).trim(), answer)
+          : `Shown ${checked.labels.length} version${checked.labels.length === 1 ? '' : 's'} (${checked.labels.join(', ')}) to the user. ` +
+            'Do not implement until they accept one or give feedback.';
+        return { content: [{ type: 'text', text }] };
       }
 
       case 'list_mcp_connections': {

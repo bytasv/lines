@@ -37,6 +37,7 @@ How everything in the transcript is drawn: text, tool calls, and subagent runs.
 
 - `web/src/components/Transcript.tsx` (`Item`, `case 'user'` and `case 'assistant'`)
 - Any expanded tool card in the transcript (`web/src/components/ToolCallCard.tsx`)
+- A `propose_ui` call, rendered as its own UI proposal card (`web/src/components/UiProposal.tsx`)
 - A settled `AskUserQuestion` call, rendered bare as its own top-level review — no chevron, never
   grouped or folded away; before it was deduped this coexisted with a separate "Claude asked"
   summary below it, which still appears for a denied/expired question
@@ -219,6 +220,29 @@ For `Transcript.tsx`'s permission-item filter: previously just `!data.auto`, it 
 keeps its separate "Claude asked" card, since that copy ("re-send your prompt and Claude will ask
 again") exists nowhere else, and keeps the ordinary collapsible tool card too (the early-return
 only applies to a non-error settled question).
+
+### UI proposal cards
+
+A `propose_ui` call (`PROPOSE_UI_TOOL`, see [workflow-mcp-tools](workflow-mcp-tools.md)) is
+always its own top-level item, like a question: `buildTranscript` isolates it into a single-tool
+group whatever the tool-grouping level, and `foldAgentTurns` treats it as a boundary, so a mock the
+user has to pick from is never folded into a collapsed turn. `ToolCallCard` returns `UiProposal`
+whenever `parseProposalInput` accepts the input, pending or settled, so the frames are not
+remounted when the result lands. An error result, or input that does not parse yet, stays an
+ordinary row.
+
+Each version is a sandboxed page in `HtmlFrame`, with the app's design tokens injected
+(`withAppTokens`, from `readAppTokens`). Focus keeps every version's frame mounted in one grid cell
+and shows only the active one, all at the tallest version's height, so switching tabs never reloads
+a page or moves the transcript. Compare lists the versions one under another. Switching views holds
+the card header in place on screen through `TranscriptAnchorContext`, which the transcript provides,
+so the scroll position does not follow the card's new height.
+
+A revision (`revise: true` with the same title) is threaded per title (`ProposalThread`): it replaces
+versions by label, the earlier card folds to one line that stays openable, and every revision of each
+version is kept for the revision switch. The card's answer state comes from the tool's result text
+(`proposalOutcome`), and while a change is being made the transcript hides the activity row, since
+the card's own button shows the progress.
 
 ### Subagents
 
@@ -528,6 +552,13 @@ they belong to the card and not to the compaction.
   the approve card already show that state live. A park marker that does render always
   means the step failed or published nothing; the emitted/stored event set is unchanged.
 
+- A `propose_ui` call is never folded into a tool group or a turn: the choice it asks for is the user's,
+  and must stay visible until answered.
+- A revision replaces versions by label in place. The earlier card folds to a line, and every earlier
+  revision of a version stays reachable from the card.
+- Focus keeps every version's frame mounted and stacked, so switching versions never reloads a page or
+  changes the card's height.
+
 ## Architectural rules
 
 - User and agent transcript text share one markdown renderer (`Markdown`) rather than each having
@@ -713,6 +744,9 @@ they belong to the card and not to the compaction.
   back" is a claim that can go stale — one name a future change can grep for before adding to (or
   removing from) the drop set. The `compact_result` exemption is the existing precedent that this
   drop set is not blanket.
+
+- Proposal frames reuse the file preview's sandboxed shell (`/html-preview.html`). Nothing in the
+  shell's CSP or sandbox differs for transcript mocks.
 
 ## Related decisions
 
