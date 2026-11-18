@@ -300,6 +300,30 @@
   ],
   "desktop": [
     {
+      "version": "0.2.66",
+      "date": "2026-11-18",
+      "items": [
+        "Editing a workflow no longer shifts the steps of sessions already running it: a session keeps the steps it started with, and your changes apply to new sessions.",
+        {
+          "text": "Questions about a pending plan are answered by a read-only copy of the conversation, so asking never changes the plan or any files.",
+          "image": "desktop-next-plan-ask-readonly.png"
+        },
+        {
+          "text": "Goals are checked after every turn: Stop always halts them, and a failed turn, a failed check or an app restart pauses them until you resume.",
+          "image": "desktop-next-goals.png"
+        },
+        {
+          "text": "After a network change or waking from sleep, Lines reconnects by itself, and the “Can’t reach Lines” page retries on its own once you are back online.",
+          "image": "desktop-next-network-reconnect.png"
+        },
+        "With Code Mode turned on, sessions start Claude Code with its experimental Code Mode; an older Claude Code keeps working without it.",
+        {
+          "text": "A running workflow can take a newer version of a step it hasn't started yet, but only when you choose Update; steps already running or finished keep what they ran.",
+          "image": "desktop-next-step-update.png"
+        }
+      ]
+    },
+    {
       "version": "0.2.64",
       "date": "2026-10-28",
       "items": [
@@ -448,24 +472,5 @@
       ]
     }
   ],
-  "desktopPending": [
-    "Editing a workflow no longer shifts the steps of sessions already running it: a session keeps the steps it started with, and your changes apply to new sessions.",
-    {
-      "text": "Questions about a pending plan are answered by a read-only copy of the conversation, so asking never changes the plan or any files.",
-      "image": "desktop-next-plan-ask-readonly.png"
-    },
-    {
-      "text": "Goals are checked after every turn: Stop always halts them, and a failed turn, a failed check or an app restart pauses them until you resume.",
-      "image": "desktop-next-goals.png"
-    },
-    {
-      "text": "After a network change or waking from sleep, Lines reconnects by itself, and the “Can’t reach Lines” page retries on its own once you are back online.",
-      "image": "desktop-next-network-reconnect.png"
-    },
-    "With Code Mode turned on, sessions start Claude Code with its experimental Code Mode; an older Claude Code keeps working without it.",
-    {
-      "text": "A running workflow can take a newer version of a step it hasn't started yet, but only when you choose Update; steps already running or finished keep what they ran.",
-      "image": "desktop-next-step-update.png"
-    }
-  ]
+  "desktopPending": []
 }
