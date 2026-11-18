@@ -310,6 +310,16 @@
   ],
   "desktop": [
     {
+      "version": "0.2.67",
+      "date": "2026-11-18",
+      "items": [
+        {
+          "text": "Claude can show you UI options as live mockups while it plans and wait for your pick, so the plan shows the design you chose above its text.",
+          "image": "desktop-next-plan-chosen-design.png"
+        }
+      ]
+    },
+    {
       "version": "0.2.66",
       "date": "2026-11-18",
       "items": [
@@ -482,10 +492,5 @@
       ]
     }
   ],
-  "desktopPending": [
-    {
-      "text": "Claude can show you UI options as live mockups while it plans and wait for your pick, so the plan shows the design you chose above its text.",
-      "image": "desktop-next-plan-chosen-design.png"
-    }
-  ]
+  "desktopPending": []
 }
