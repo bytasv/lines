@@ -69,7 +69,8 @@ deliverable is written and reviewed.
   client sent as `denyMessage`). With zero comments the card is unchanged from before this existed.
 
 - **Plan side-chat** — ask a question about a pending plan card, or about one highlighted passage,
-  and get an answer from a forked, read-only copy of the session's conversation. The live turn stays
+  and get an answer from a forked copy of the session's conversation. The fork is read-only, except
+  that it may revise the card's own plan file when the user asks for a change. The live turn stays
   blocked on the card, and nothing in the question writes to the conversation. An answer can be
   turned into a normal plan comment.
 
@@ -806,10 +807,24 @@ the dangling tool call stays out of the fork. The first prompt carries the plan 
 fork ends before the card's call. Later questions resume the same fork. After a bridge restart the
 fork id is recovered from the newest answer in the transcript, so no second fork is made.
 
-The side query (`runPlanChatTurn`) runs with plan-mode read rules only. A call is allowed only when
+The side query (`runPlanChatTurn`) runs with plan-mode read rules. A call is allowed only when
 `planChatToolDecision` accepts it, and the same decision runs both in a PreToolUse hook (which
-precedes settings allow rules) and in `canUseTool`. The write tools are also in `disallowedTools`.
-No MCP servers are attached, the turn cap is 15, and a question is abandoned after five minutes.
+precedes settings allow rules) and in `canUseTool`. The write tools are in `disallowedTools`, except
+when the card has a plan file (`planChatPlanFile`: the newest Write or Edit into a plans directory
+before the card, subagent writes included). Then Write and Edit come off that list, and the decision
+allows them only on that exact file, and only when `isPlanPath` confirms it is a real plan directory
+under the session's roots. Every other write, MultiEdit and NotebookEdit stays denied. An inline-plan
+card with no plan file stays answer-only. No MCP servers are attached, the turn cap is 15, and a
+question is abandoned after five minutes.
+
+The system prompt tells the fork to edit only when the user asks for a change, to Read the file
+first, and to change only what was asked. Edits apply immediately. The side chat compares the plan
+file's text before and after each answer, so a denied or failed attempt does not count. When the text
+changed, the answer is saved with `planEdited` and the plan file's path. The card re-reads that file
+live for every viewer, and the answer shows a "Plan updated" marker. Resolving the card with keep
+planning adds a note to the deny reason, and approving sends the same note into the turn. The note
+tells the live turn to re-read the plan file, because the turn may still hold the plan it proposed.
+A workflow plan step needs no note, since the next step reads the file itself.
 
 Progress is streamed as `'plan-chat'` events with role `partial`: the whole text so far, plus the
 tool or thinking phase, at most every 100 ms. Partials are broadcast only and never written to the

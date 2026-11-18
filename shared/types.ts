@@ -1587,6 +1587,14 @@ export interface PlanChatEventData {
   forkSessionId?: string;
   /** Answer only: what the side turn cost. Not folded into session spend. */
   costUsd?: number;
+  /**
+   * Answer only: the side chat changed the plan file while answering (its text
+   * differs from before the question). The card re-reads the file, and the live
+   * turn is told to re-read it when the card is resolved.
+   */
+  planEdited?: boolean;
+  /** Answer only, with `planEdited`: the plan file that was changed. */
+  planPath?: string;
   at: number;
 }
 

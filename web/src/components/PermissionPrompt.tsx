@@ -1254,6 +1254,14 @@ function PlanApproval({
     if (open && !wasOpen.current) setReloadKey((k) => k + 1);
     wasOpen.current = open;
   }, [open]);
+  // A side-chat answer that edited the plan file: re-read it now, so the open
+  // card (inline and fullscreen) shows the revision for every viewer.
+  const planEdits = (planChat ?? []).filter((entry) => entry.role === 'answer' && entry.planEdited).length;
+  const seenPlanEdits = useRef(planEdits);
+  useEffect(() => {
+    if (planEdits !== seenPlanEdits.current) setReloadKey((k) => k + 1);
+    seenPlanEdits.current = planEdits;
+  }, [planEdits]);
   const { content } = useFileContent(open ? planPath : undefined, reloadKey);
   const shown = content ?? plan;
   const revised = Boolean(content && content !== plan);

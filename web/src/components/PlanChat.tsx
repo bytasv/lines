@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   ActionIcon,
+  Badge,
   Box,
   Button,
   CloseButton,
@@ -155,14 +156,16 @@ export function PlanChat({
         <CloseButton size="sm" aria-label="Close questions" onClick={onClose} />
       </Group>
       <Text size="xs" c="dimmed" px="md" pb="xs">
-        Answered by a read-only copy of the agent. Nothing here changes the plan — add an answer as a
-        comment to act on it.
+        Answered by a copy of the agent that can read files, and change the plan when you ask it to.
+        Add an answer as a comment to act on it otherwise.
       </Text>
       <ScrollArea viewportRef={viewport} style={{ flex: 1, minHeight: 0 }} px="md">
         <Stack gap="sm" pb="sm">
           {exchanges.length === 0 && (
             <Text size="xs" c="dimmed">
-              {canAsk ? 'Highlight a passage and click Ask, or type a question below.' : 'No questions were asked.'}
+              {canAsk
+                ? 'Highlight a passage and click Ask, or type a question or a change to make below.'
+                : 'No questions were asked.'}
             </Text>
           )}
           {exchanges.map((ex) => {
@@ -210,6 +213,11 @@ export function PlanChat({
                 )}
                 {ex.reply?.role === 'answer' && (
                   <Box px={4}>
+                    {ex.reply.planEdited && (
+                      <Badge size="xs" variant="light" color="violet" mb={4}>
+                        Plan updated
+                      </Badge>
+                    )}
                     <Box fz="sm">
                       <Markdown text={ex.reply.text} />
                     </Box>
@@ -330,7 +338,7 @@ export function PlanChat({
               variant="unstyled"
               styles={{ input: { background: 'transparent', paddingInline: 6 } }}
               data-autofocus
-              placeholder={`${quote ? 'Ask about this passage' : 'Ask about the plan'}…${
+              placeholder={`${quote ? 'Ask about this passage' : 'Ask about the plan, or ask for changes'}…${
                 isPhone ? '' : ' (↵ to send, ⇧↵ for newline)'
               }`}
               value={draft}

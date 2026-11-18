@@ -198,6 +198,8 @@ function harness(
     events?: TranscriptEvent[];
     workflow?: WorkflowState;
     settings?: UserUiSettings;
+    /** The session's cwd; defaults to the shared `cwd`. */
+    cwd?: string;
   } = {},
 ) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lines-provenance-'));
@@ -207,7 +209,7 @@ function harness(
       {
         id: 's1',
         name: 's1',
-        cwd,
+        cwd: opts.cwd ?? cwd,
         model: 'claude-opus-5-5',
         permissionMode: opts.mode ?? 'default',
         status: 'running',
@@ -1136,12 +1138,32 @@ test('accept-edits leaves an ordinary project edit to the CLI', async () => {
 const assistantSdk = (uuid: string, content: unknown[]): TranscriptEvent =>
   ev('sdk', { type: 'assistant', uuid, parent_tool_use_id: null, message: { content } });
 
-/** A plan-mode session parked on ExitPlanMode `p1`, with the side query stubbed. */
-async function planChatHarness() {
+/**
+ * A plan-mode session parked on ExitPlanMode `p1`, with the side query stubbed.
+ * With `planFile`, the session lives in a throwaway project whose turn wrote its
+ * plan to `<root>/.claude/plans/x.md`, and the card carries no inline plan.
+ */
+async function planChatHarness(opts: { planFile?: boolean } = {}) {
+  const projectRoot = opts.planFile
+    ? fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'lines-plan-chat-')))
+    : undefined;
+  const planFile = projectRoot ? path.join(projectRoot, '.claude', 'plans', 'x.md') : undefined;
+  if (planFile) {
+    fs.mkdirSync(path.dirname(planFile), { recursive: true });
+    fs.writeFileSync(planFile, '# Plan\n\n1. First.\n2. Second.\n');
+  }
   const h = harness({
     mode: 'plan',
+    ...(projectRoot ? { cwd: projectRoot } : {}),
     events: [
       ev('user', { text: 'plan the thing' }),
+      ...(planFile
+        ? [
+            assistantSdk('a0', [
+              { type: 'tool_use', id: 'tw', name: 'Write', input: { file_path: planFile, content: '# Plan' } },
+            ]),
+          ]
+        : []),
       assistantSdk('a1', [{ type: 'text', text: 'Here is my plan.' }]),
       assistantSdk('a2', [{ type: 'tool_use', id: 't1', name: 'ExitPlanMode', input: { plan: 'P' } }]),
     ],
@@ -1152,7 +1174,7 @@ async function planChatHarness() {
     forks.push({ id, upToMessageId: opts?.upToMessageId });
     return { sessionId: `fork-${forks.length}` };
   }) as never;
-  const asks: { forkSessionId: string; prompt: string; signal: AbortSignal }[] = [];
+  const asks: { forkSessionId: string; prompt: string; signal: AbortSignal; planPath?: string }[] = [];
   /** Resolvers for the stubbed side queries, in order; each answers its ask. */
   const replies: ((text: string) => void)[] = [];
   h.sessions.planChatRunner = (req) =>
@@ -1162,15 +1184,25 @@ async function planChatHarness() {
       replies.push((text) => resolve({ text, sessionId: req.forkSessionId, costUsd: 0.01 }));
     });
   void h.sessions.handleWorkerRpc(
-    canUseToolWith('p1', 'ExitPlanMode', { plan: 'Step 1. Do the thing.' }),
+    canUseToolWith('p1', 'ExitPlanMode', planFile ? {} : { plan: 'Step 1. Do the thing.' }),
   );
   await settle();
   const chat = () =>
     (h.sessions as unknown as { store: { loadTranscript(id: string): TranscriptEvent[] } }).store
       .loadTranscript('s1')
       .filter((e) => e.kind === 'plan-chat')
-      .map((e) => e.data as { role: string; text: string; askId: string; forkSessionId?: string });
-  return { ...h, forks, asks, replies, chat };
+      .map(
+        (e) =>
+          e.data as {
+            role: string;
+            text: string;
+            askId: string;
+            forkSessionId?: string;
+            planEdited?: boolean;
+            planPath?: string;
+          },
+      );
+  return { ...h, forks, asks, replies, chat, planFile };
 }
 
 /** Long enough for the fork, the runner and the answer's emit to chain through. */
@@ -1298,4 +1330,80 @@ test('a streaming side answer is never written to the transcript, only its final
       ['answer', 'Because.'],
     ],
   );
+});
+
+// ---------------------------------------------------------------------------
+// Plan side-chat edits to the plan file
+// ---------------------------------------------------------------------------
+
+/** Ask once and answer, optionally rewriting the plan file as the fork would. */
+async function askAndAnswer(h: Awaited<ReturnType<typeof planChatHarness>>, edit?: string) {
+  h.sessions.askPlanChat('s1', 'p1', { askId: 'q1', text: 'drop step 2' });
+  await settleLong();
+  if (edit !== undefined) fs.writeFileSync(h.planFile!, edit);
+  h.replies[0]('Done.');
+  await settleLong();
+}
+
+test('the side chat is handed the card\'s plan file, and the first ask carries its text', async () => {
+  const h = await planChatHarness({ planFile: true });
+  h.sessions.askPlanChat('s1', 'p1', { askId: 'q1', text: 'why?' });
+  await settleLong();
+  assert.equal(h.asks[0].planPath, h.planFile);
+  assert.match(h.asks[0].prompt, /2\. Second\./, 'the plan file rides the first ask');
+});
+
+test('a session with no plan file gives the side chat none', async () => {
+  const h = await planChatHarness();
+  h.sessions.askPlanChat('s1', 'p1', { askId: 'q1', text: 'why?' });
+  await settleLong();
+  assert.equal(h.asks[0].planPath, undefined);
+});
+
+test('an answer that changed the plan file is marked planEdited', async () => {
+  const h = await planChatHarness({ planFile: true });
+  await askAndAnswer(h, '# Plan\n\n1. First.\n');
+  const answer = h.chat().find((c) => c.role === 'answer')!;
+  assert.equal(answer.planEdited, true);
+  assert.equal(answer.planPath, h.planFile);
+});
+
+test('an answer that left the plan file alone is not marked', async () => {
+  const h = await planChatHarness({ planFile: true });
+  await askAndAnswer(h);
+  const answer = h.chat().find((c) => c.role === 'answer')!;
+  assert.equal(answer.planEdited, undefined);
+  assert.equal(answer.planPath, undefined);
+});
+
+test('keep planning after a side-chat edit tells the turn to re-read the plan', async () => {
+  const h = await planChatHarness({ planFile: true });
+  await askAndAnswer(h, '# Plan\n\n1. First.\n');
+  h.sessions.resolvePermission('s1', 'p1', false, undefined, undefined, keepPlanningReason('shorter'));
+  await settle();
+  const deny = h.cards().at(-1)!;
+  assert.equal(deny.resolution, 'deny');
+  assert.ok(deny.denyMessage?.includes(`re-read ${h.planFile}`), 'the note rides the deny');
+  assert.ok(deny.denyMessage?.startsWith(KEEP_PLANNING_MESSAGE), 'still a keep-planning reason');
+  assert.ok(deny.denyMessage?.endsWith(`${PLAN_REPLY_MARKER}shorter`), "the user's words stay last");
+});
+
+test('approving after a side-chat edit steers the turn to re-read the plan', async () => {
+  const h = await planChatHarness({ planFile: true });
+  await askAndAnswer(h, '# Plan\n\n1. First.\n');
+  h.goLive();
+  h.sessions.resolvePermission('s1', 'p1', true);
+  await settle();
+  assert.equal(h.cards().at(-1)!.resolution, 'allow');
+  assert.match(h.interjections().at(-1)?.text ?? '', /re-read .*x\.md/);
+});
+
+test('approving with no side-chat edit pushes nothing', async () => {
+  const h = await planChatHarness({ planFile: true });
+  await askAndAnswer(h);
+  h.goLive();
+  h.sessions.resolvePermission('s1', 'p1', true);
+  await settle();
+  assert.deepEqual(h.interjections(), []);
+  assert.deepEqual(h.s1().queued ?? [], []);
 });

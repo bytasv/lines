@@ -66,6 +66,7 @@ import {
   declinePlanReason,
   KEEP_PLANNING_MESSAGE,
   keepPlanningReason,
+  PLAN_REPLY_MARKER,
   planModeRejectMessage,
   normalizeCodexNotification,
   planCommentsBody,
@@ -112,7 +113,7 @@ import { claudeCliRefusalMessage, claudeCliStatus, claudeCliSupportsCodeMode } f
 import { codexCliRefusalMessage, codexCliStatus } from './codexCli.ts';
 import { OPENAI_CONNECT_MESSAGE, type OpenaiAuthManager } from './openaiAuth.ts';
 import { runHelperQuery } from './helperQuery.ts';
-import { planChatAnchor, runPlanChatTurn, type PlanChatRunner } from './planSideChat.ts';
+import { planChatAnchor, planChatPlanFile, runPlanChatTurn, type PlanChatRunner } from './planSideChat.ts';
 import { classifyTurnFailure, turnFailureAdvice, turnFailureRetryHint } from './turnFailure.ts';
 import {
   ADD_MCP_CONNECTION_TOOL,
@@ -962,6 +963,37 @@ function newestPlanChatFork(events: TranscriptEvent[], requestId: string): strin
     if (d.requestId === requestId && d.role === 'answer' && d.forkSessionId) return d.forkSessionId;
   }
   return undefined;
+}
+
+/**
+ * The plan file a side-chat answer on this card changed, when any did. The live
+ * turn still holds the plan it proposed, so resolving the card tells it to
+ * re-read this file.
+ */
+function planChatEdited(events: TranscriptEvent[], requestId: string): string | undefined {
+  for (let i = events.length - 1; i >= 0; i--) {
+    if (events[i].kind !== 'plan-chat') continue;
+    const d = events[i].data as PlanChatEventData;
+    if (d.requestId === requestId && d.role === 'answer' && d.planEdited && d.planPath) return d.planPath;
+  }
+  return undefined;
+}
+
+/** What the live turn is told when the side chat revised its plan file. */
+function planRevisedNote(planPath: string): string {
+  return `The plan file was revised during review; re-read ${planPath} before continuing.`;
+}
+
+/**
+ * Fold the revised-plan note into a keep-planning deny reason. Placed before the
+ * user's words (PLAN_REPLY_MARKER) so the card still renders only those back.
+ */
+function withPlanRevisedNote(denyMessage: string | undefined, note: string): string {
+  if (!denyMessage) return note;
+  const at = denyMessage.indexOf(PLAN_REPLY_MARKER);
+  return at === -1
+    ? `${denyMessage}\n\n${note}`
+    : `${denyMessage.slice(0, at)}${note}\n\n${denyMessage.slice(at)}`;
 }
 
 /**
@@ -4813,6 +4845,12 @@ export class SessionManager {
     if (!forkId && (!anchor || !meta.claudeSessionId)) {
       return { ok: false, reason: 'There is no conversation to ask about yet.' };
     }
+    // The card's plan file, the one file the fork may revise. Only a real plan
+    // path under this session's roots qualifies; otherwise the chat stays
+    // answer-only (an inline-plan card from an older harness has none).
+    const roots = this.rootsFor(meta);
+    const planCandidate = planChatPlanFile(events, requestId);
+    const planPath = planCandidate && isPlanPath(planCandidate, roots) ? planCandidate : undefined;
     // A question left unanswered by a bridge restart would show as pending
     // forever; close it before asking the next one.
     this.closeOrphanPlanChat(sessionId, requestId, events);
@@ -4831,7 +4869,13 @@ export class SessionManager {
 
     // The first question carries the plan itself: the fork ends before the
     // ExitPlanMode call, so the plan text may exist nowhere else it can see.
-    const plan = typeof original.input?.plan === 'string' ? original.input.plan.trim() : '';
+    // With no inline plan, the plan file's text: the fork may predate its final
+    // write. Later questions need neither — the fork's history has its own edits.
+    const inlinePlan = typeof original.input?.plan === 'string' ? original.input.plan.trim() : '';
+    const plan = inlinePlan || (!forkId && planPath ? (readPlanFile(planPath, roots)?.trim() ?? '') : '');
+    // Compared with the file after the answer: a content diff, not a count of
+    // edit calls, so a denied or failed edit attempt never reads as an edit.
+    const planBefore = planPath ? readPlanFile(planPath, roots) : undefined;
     const parts: string[] = [];
     if (!forkId && plan) parts.push(`The plan under review:\n\n${plan}`);
     if (ask.quote) parts.push(`Regarding this part of the plan: "${ask.quote}"`);
@@ -4879,10 +4923,11 @@ export class SessionManager {
           forkSessionId: forkId,
           prompt,
           cwd: meta.cwd,
-          roots: this.rootsFor(meta),
+          roots,
           model: resolveModelId(meta.model),
           token: await this.ownerToken(),
           allowlist: () => this.guard.list(),
+          ...(planPath ? { planPath } : {}),
           signal: controller.signal,
           onPartial,
         });
@@ -4892,6 +4937,7 @@ export class SessionManager {
           settled = true;
           if (controller.signal.aborted) throw new Error('Cancelled.');
           this.planChatForks.set(key, answer.sessionId);
+          const planEdited = !!planPath && readPlanFile(planPath, roots) !== planBefore;
           this.emitEvent(sessionId, 'plan-chat', {
             requestId,
             askId: ask.askId,
@@ -4899,6 +4945,7 @@ export class SessionManager {
             text: answer.text,
             forkSessionId: answer.sessionId,
             ...(answer.costUsd !== undefined ? { costUsd: answer.costUsd } : {}),
+            ...(planEdited ? { planEdited: true, planPath } : {}),
             at: Date.now(),
           } satisfies PlanChatEventData);
           console.log(
@@ -5611,6 +5658,13 @@ export class SessionManager {
     // Comments belong to a plan review and nowhere else; anything attached to
     // another tool's card is dropped rather than smuggled into its reason.
     const comments = original?.toolName === 'ExitPlanMode' ? (planComments ?? []) : [];
+    // The side chat revised the plan file while the card was up: the live turn
+    // still holds the plan it proposed, so it is told to re-read the file. A
+    // workflow plan step needs no note — the next step reads the file itself.
+    const revisedPlan =
+      original?.toolName === 'ExitPlanMode' && !planStepGate
+        ? planChatEdited(this.store.loadTranscript(sessionId), requestId)
+        : undefined;
     // The server owns the wording on a deny, so "Refine with comments", the typed
     // composer reply, and messages waiting in the queue read identically to the
     // model — whatever the client sent as `denyMessage` is discarded.
@@ -5627,6 +5681,7 @@ export class SessionManager {
         source === 'user' && meta0 ? this.takeQueuedPlanReply(meta0, actor) : ([] as string[]);
       const body = [planCommentsBody(comments), ...folded].filter(Boolean).join('\n\n');
       if (body) denyMessage = keepPlanningReason(body);
+      if (revisedPlan) denyMessage = withPlanRevisedNote(denyMessage, planRevisedNote(revisedPlan));
     }
     // updatedInput is recorded so a worker rpc re-send after a bridge restart
     // can be answered from the transcript with the exact approved input — the
@@ -5703,9 +5758,17 @@ export class SessionManager {
     // push is synchronous with the resolve above, before the CLI has
     // round-tripped the model, so they land with the approval rather than after
     // the implementation is underway.
-    if (allow && comments.length) {
+    //
+    // The revised-plan note rides the same delivery: the CLI may hand the model
+    // the plan as it was proposed, not the file's current text.
+    if (allow && (comments.length || revisedPlan)) {
       const meta = this.sessions.get(sessionId);
-      const text = formatPlanComments(comments, 'approve');
+      const text = [
+        comments.length ? formatPlanComments(comments, 'approve') : '',
+        revisedPlan ? planRevisedNote(revisedPlan) : '',
+      ]
+        .filter(Boolean)
+        .join('\n\n');
       if (meta && this.canInterject(sessionId)) {
         this.emitEvent(sessionId, 'interject', {
           text,
