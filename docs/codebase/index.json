@@ -5149,7 +5149,7 @@
         "nextSeen caps at the newest release the bundle knows, so desktop notes stamped after a web deploy still show on a later load",
         "decided once per page load, so a machine switch never reshows the card; guests never see it",
         "desktop notes wait in desktopPending until ship.mjs stamps them with the version it bumps; the CI guard fails on a non-empty desktopPending",
-        "only user-facing feat or noticeable fix commits get an entry, one short user-worded line each; web/ paths go to the web track with a web/package.json patch bump, desktop/ server/ shared/ paths go to desktopPending",
+        "only user-facing feat or noticeable fix changes get an entry, one short user-worded line each and one item per change on one track: web/ paths go to the web track with a web/package.json patch bump, desktop/ server/ shared/ paths go to desktopPending, and a change touching both goes to the web track only; a feature already listed in desktopPending or the newest three releases of a track gets no second item",
         "an item is a plain line or `{text, image}`; the image is a card file name under web/public/changelog-media, shown under the line in What's new",
         "the announce job sends each release a deploy added to a web or desktop track to social-driver as a draft (keyed `lines-<track>@<version>`); pending desktop items are never announced, and a missing webhook secret is a no-op"
       ],

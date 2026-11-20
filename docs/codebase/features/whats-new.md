@@ -88,11 +88,15 @@ Pending desktop items are never sent.
 a "New" badge on releases above what this browser had seen when the page loaded, and a dashed
 "Next desktop release" entry while `desktopPending` is non-empty.
 
-**Producing entries.** The Lines dev workflow's commit step writes one user-worded line per
-user-facing commit (feat, or a fix a user would notice; never docs, chore, refactor, tests). Paths
-under `web/` go to the web track: bump `web/package.json`'s patch version and prepend a release.
-Paths under `desktop/`, `server/` or `shared/` go to `desktopPending`. `ship.mjs` stamps pending
-notes into a new `desktop` release when it commits a version bump, in the same commit.
+**Producing entries.** The Lines dev workflow's Changelog step writes the entry and its card, and
+the Commit step commits it with the change. Each user-facing change (a feat, or a fix a user would
+notice; never docs, chore, refactor, tests) gets one user-worded line on one track. A change that
+touches both `web/` and `desktop/`, `server/` or `shared/` gets a single web item, and its bridge
+part ships without its own line. Paths only under `web/` go to the web track: bump `web/package.json`'s
+patch version and prepend a release. Paths only under `desktop/`, `server/` or `shared/` go to
+`desktopPending`. Before writing, the step checks `desktopPending` and the newest three releases of
+each track; if an item already describes the feature, no second item is added. `ship.mjs` stamps
+pending notes into a new `desktop` release when it commits a version bump, in the same commit.
 
 ## Tests
 
