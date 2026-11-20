@@ -320,6 +320,16 @@
   ],
   "desktop": [
     {
+      "version": "0.2.68",
+      "date": "2026-11-20",
+      "items": [
+        {
+          "text": "Claude now lays out a task list for multi-step requests, so the turn's checklist shows the planned steps up front and ticks them off as it works.",
+          "image": "desktop-next-task-list.png"
+        }
+      ]
+    },
+    {
       "version": "0.2.67",
       "date": "2026-11-18",
       "items": [
@@ -502,10 +512,5 @@
       ]
     }
   ],
-  "desktopPending": [
-    {
-      "text": "Claude now lays out a task list for multi-step requests, so the turn's checklist shows the planned steps up front and ticks them off as it works.",
-      "image": "desktop-next-task-list.png"
-    }
-  ]
+  "desktopPending": []
 }
