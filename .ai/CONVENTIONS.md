@@ -10,7 +10,7 @@ Use repository-relative paths. Do not expose secrets or credentials.
 
 For repository context, always start with:
 
-1. `docs/codebase/index.json`
+1. `docs/codebase/feature-index.md`, then query `docs/codebase/index.json` per feature (it is too large to Read whole)
 2. Relevant linked feature documents
 3. Listed entry points and tests
 4. Targeted code search if needed
