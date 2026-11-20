@@ -86,8 +86,10 @@ and how status is surfaced in the sidebar row and the project tab.
 - `web/src/lib/mentions.ts` (`MentionValue` — the persisted text/mentions shape)
 - `shared/types.ts` — `SessionMeta.createdAt`, `SessionMeta.pendingPermissionTool`,
   `SessionMeta.groupId`, `SessionGroup`, `UserUiSettings.sessionGroups`/`sessionOrder`,
-  `isSessionMuted`, `allSessionGroups`, the `setSessionGroup` message
-- `server/src/sessions.ts` — `setSessionGroup` (beside `archiveSession`; leaves `groupId` alone on
+  `isSessionMuted`, `allSessionGroups`, the `setSessionGroup` message, the `renameSession` message
+  and `SESSION_NAME_MAX`
+- `server/src/sessions.ts` — `renameSession` and `manualNamed` (the auto-name race guard in
+  `autoName`); `setSessionGroup` (beside `archiveSession`; leaves `groupId` alone on
   archive, unarchive and prompt reactivation)
 - `server/src/pushNotifier.ts` — `isMuted` hook skipping pushes for muted groups
 - `web/src/lib/format.ts` — `projectStatusMeta` (takes the group list to skip muted sessions),
@@ -105,6 +107,9 @@ and how status is surfaced in the sidebar row and the project tab.
 - `web/src/lib/alerts.ts` — notification body text; `maybeAlert`'s background-tasks early return
   (see [background-tasks](background-tasks.md)) and its muted-group early return
 - `web/src/components/Composer.tsx` — Stop-button gating against `session.backgroundTasks`
+- `web/src/components/InlineSessionName.tsx` — the in-place title input shared by the sidebar row
+  and the session header (manual rename)
+- `web/src/components/SessionView.tsx` — header title double-click and the phone "Rename" item
 
 ## Symbols
 
@@ -355,6 +360,20 @@ removes it (unaffected — see the `applyServerMessage` case). If `send()` retur
 socket isn't open — `setActionError` records a message, which the sidebar renders (and lets the
 user dismiss by clicking it) instead of the delete looking like it silently did nothing.
 
+### Manual rename
+
+A session's title can be set by the user as well as by the auto-namer. On desktop, double-clicking
+the title in the sidebar row or the session header swaps it for `InlineSessionName`, a bare input
+with the title's own font and line box, so nothing shifts. On a phone, the row's overflow menu and
+the header's "Session actions" menu both have a "Rename" item that opens the same input. Enter or
+blur sends `renameSession`; Escape cancels. The input keeps the typed text until the
+`sessionUpsert` echo updates the name, with no optimistic store write.
+
+The bridge's `renameSession` trims and collapses whitespace, caps the name at `SESSION_NAME_MAX`
+(100), and clears `nameAuto`, so a later first prompt does not title over it. A `manualNamed` set
+keeps an auto-name already in flight from overwriting the user's name. Read-only sessions and
+empty or unchanged names are ignored.
+
 ### Session groups
 
 Groups are settings, not a new store: `setGroups` in the store edits `sessionGroups` (and
@@ -381,7 +400,9 @@ same group list from its own settings to skip muted sessions.
 Server-side: `server/src/sessions.groups.test.ts` (set/clear and persistence of `groupId`, kept
 through archive, unarchive, prompt reactivation and `adoptSynced`), `server/src/statusMeta.test.ts`
 (muted skip in `projectStatusMeta`/`machineActivity`, `isSessionMuted` with `isAlertTransition`,
-manual comparator), `server/src/pushNotifier.test.ts` (no push for a muted group),
+manual comparator), `server/src/sessions.rename.test.ts` (trim, cap, `nameAuto` flip, no-op
+names, read-only and unknown ids, the auto-name race and retry cases), `server/src/messageAuthz.test.ts`
+(`renameSession` needs `manageSessions`), `server/src/pushNotifier.test.ts` (no push for a muted group),
 `server/src/sync.sessions.test.ts` (`groupId` round-trip), `server/src/store.test.ts` (group settings
 survive save and load).
 
@@ -530,6 +551,14 @@ and "auto-select needs `pendingCreate`" is the recommended follow-up.
   ranked below `waiting-permission` and the interrupted state — both of those need the user,
   background work does not — and the composer's Stop button stays enabled for it (sending
   `stopBackgroundTasks` instead of `interrupt`) even though the session reads as settled.
+- Manual rename is gated on `manageSessions` and not read-only, the same as archive. Rename is
+  not offered for a read-only session, and the bridge refuses it too.
+- Renaming a session that was never prompted clears `nameAuto`, so its first prompt keeps the
+  user's name and the row is no longer treated as new (delete goes through archive and confirm).
+- A rename does not rename an existing worktree branch. Only a rename that lands before the
+  auto-name settles reaches the branch namer.
+- An empty name is ignored and the old name kept; there is no revert to auto-name.
+
 
 ## Architectural rules
 

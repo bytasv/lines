@@ -1192,7 +1192,7 @@
       "id": "session-and-project-ui",
       "name": "Session and project UI",
       "doc": "features/session-and-project-ui.md",
-      "purpose": "The shell around a session: persisted unsent drafts, focus on a new session, which session a project switch opens (preferring the project's remembered last-selected session before falling back to latest-created), the project tab's status dot (pulsing for actionable states, steady for live work and recent unseen finishes), the tool-aware waiting-permission badge, and per-project sidebar prefs (sort, new-session choice, worktree toggle, Sessions/Files view), and per-project session groups (user-made sections that park sessions, with collapse, reorder, mute and a manual sort order).",
+      "purpose": "The shell around a session: persisted unsent drafts, focus on a new session, which session a project switch opens (preferring the project's remembered last-selected session before falling back to latest-created), the project tab's status dot (pulsing for actionable states, steady for live work and recent unseen finishes), the tool-aware waiting-permission badge, and per-project sidebar prefs (sort, new-session choice, worktree toggle, Sessions/Files view), and manual session rename (double-click or phone menu), per-project session groups (user-made sections that park sessions, with collapse, reorder, mute and a manual sort order).",
       "covers": [
         "composer-draft-persistence",
         "composer-focus-new-session",
@@ -1203,7 +1203,8 @@
         "hello-duplicate-inertness",
         "session-list-sorting",
         "session-groups",
-        "project-session-prefs"
+        "project-session-prefs",
+        "manual-session-rename"
       ],
       "entryPoints": [
         "web/src/components/Composer.tsx",
@@ -1212,7 +1213,8 @@
         "web/src/App.tsx",
         "web/src/components/Sidebar.tsx",
         "web/src/lib/alerts.ts",
-        "web/src/components/SessionGroupSection.tsx"
+        "web/src/components/SessionGroupSection.tsx",
+        "web/src/components/InlineSessionName.tsx"
       ],
       "files": [
         "web/src/components/QueuedMessages.tsx",
@@ -1227,7 +1229,9 @@
         "web/src/components/Sidebar.tsx",
         "web/src/lib/alerts.ts",
         "web/src/components/SessionGroupSection.tsx",
-        "server/src/pushNotifier.ts"
+        "server/src/pushNotifier.ts",
+        "web/src/components/InlineSessionName.tsx",
+        "web/src/components/SessionView.tsx"
       ],
       "symbols": [
         "OfflineQueuedMessages",
@@ -1306,7 +1310,11 @@
         "guestSessionLayout",
         "guestLayouts",
         "sidebarLayout",
-        "knownSessionGroups"
+        "knownSessionGroups",
+        "renameSession",
+        "manualNamed",
+        "InlineSessionName",
+        "SESSION_NAME_MAX"
       ],
       "tests": [
         "server/src/statusMeta.test.ts",
@@ -1315,7 +1323,8 @@
         "server/src/sync.sessions.test.ts",
         "server/src/store.test.ts",
         "server/src/broadcastScope.test.ts",
-        "server/src/messageAuthz.test.ts"
+        "server/src/messageAuthz.test.ts",
+        "server/src/sessions.rename.test.ts"
       ],
       "businessRules": [
         "persisted text draft is the full MentionValue (text + ranges), not plain text, so restored pills/expansions stay intact",
@@ -1357,7 +1366,10 @@
         "machine-scope guests see the owner's groups and manual order (the sessionLayout cut of settings, never the rest) and, with manageSessions, edit them via saveSessionLayout, sanitized by the bridge; session-scope guests get a flat list; collapse state is per browser for guests too; setSessionGroup needs manageSessions",
         "the old global lines.showArchived is migrated once into per-project collapsed state (archived id) and removed; collapse state stays per browser",
         "a same-section drag reorders only under the Manual sort; under an automatic sort it asks before switching, and Archived is never hand-ordered",
-        "archived sessions in the sidebar render 20 at a time behind a 'Show N more' button instead of the full archived list, since the Archived section starts expanded and a long-lived project can accumulate hundreds of them"
+        "archived sessions in the sidebar render 20 at a time behind a 'Show N more' button instead of the full archived list, since the Archived section starts expanded and a long-lived project can accumulate hundreds of them",
+        "manual rename needs manageSessions and a non-read-only session; the bridge refuses it too",
+        "a manual rename clears nameAuto and cancels a pending auto-name retry; an auto-name already in flight is dropped (manualNamed) rather than overwriting the user's name",
+        "a rename trims, collapses whitespace and caps at SESSION_NAME_MAX; empty or unchanged names are ignored"
       ],
       "architecturalRules": [
         "per-project sidebar prefs are one keyed map in settings (sessionPrefs), not per-field keys; prefsFor is the only resolver and a missing field falls back to the legacy global key",

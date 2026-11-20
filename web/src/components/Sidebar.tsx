@@ -97,6 +97,7 @@ import {
   useStore,
 } from '../store';
 import { send } from '../ws';
+import { InlineSessionName } from './InlineSessionName';
 import { FileSearchResults, FlagToggle } from './FileSearchPanel';
 import { FileTree } from './FileTree';
 import { SearchPlaceholder, SessionSearchResults } from './SessionSearchResults';
@@ -280,6 +281,9 @@ const SessionRow = memo(function SessionRow({
   const canGroup = canManage && !session.archived && !!groupKey;
   const createGroup = useStore((s) => s.createGroup);
   const [namingGroup, setNamingGroup] = useState(false);
+  // Title swapped in place for an input (double-click on desktop, "Rename" in the
+  // phone menu). Same gate as archive: Full access, not a read-only row.
+  const [renaming, setRenaming] = useState(false);
   const moveToGroup = (groupId: string | null) => {
     setActionError(null);
     send({ type: 'setSessionGroup', sessionId: session.id, groupId });
@@ -408,24 +412,41 @@ const SessionRow = memo(function SessionRow({
                 </Center>
               </Tooltip>
             )}
-            <Tooltip
-              label={session.name}
-              disabled={!overflowing}
-              openDelay={400}
-              withArrow
-              multiline
-              maw={280}
-            >
-              <Text
-                size="sm"
+            {renaming ? (
+              <InlineSessionName
+                sessionId={session.id}
+                name={session.name}
                 fw={500}
-                truncate
-                ref={check}
-                onMouseEnter={(e) => check(e.currentTarget)}
+                onDone={() => setRenaming(false)}
+              />
+            ) : (
+              <Tooltip
+                label={session.name}
+                disabled={!overflowing}
+                openDelay={400}
+                withArrow
+                multiline
+                maw={280}
               >
-                {session.name}
-              </Text>
-            </Tooltip>
+                <Text
+                  size="sm"
+                  fw={500}
+                  truncate
+                  ref={check}
+                  onMouseEnter={(e) => check(e.currentTarget)}
+                  onDoubleClick={
+                    canManage && !isPhone
+                      ? (e) => {
+                          stop(e);
+                          setRenaming(true);
+                        }
+                      : undefined
+                  }
+                >
+                  {session.name}
+                </Text>
+              </Tooltip>
+            )}
           </Group>
           <Group gap={6} wrap="nowrap" align="center" mih={17} mt={3}>
             {isPhone || (!show && status.actionable) ? (
@@ -475,8 +496,11 @@ const SessionRow = memo(function SessionRow({
           onSubmit={(name) => groupKey && moveToGroup(createGroup(groupKey, name))}
         >
           <Group gap={2} wrap="nowrap">
-            {!canManage && !canDelete ? null : isPhone ? (
-              <Menu withinPortal position="bottom-end">
+            {/* Hidden while renaming, so a stray click beside the input cannot archive. */}
+            {renaming || (!canManage && !canDelete) ? null : isPhone ? (
+              // No focus return: it would land on the ⋯ button after "Rename" and
+              // blur (so commit) the input that just took focus.
+              <Menu withinPortal position="bottom-end" returnFocus={false}>
                 <Menu.Target>
                   <ActionIcon
                     variant="subtle"
@@ -488,6 +512,11 @@ const SessionRow = memo(function SessionRow({
                   </ActionIcon>
                 </Menu.Target>
                 <Menu.Dropdown onClick={stop}>
+                  {canManage && (
+                    <Menu.Item leftSection={<IconPencil size={16} />} onClick={() => setRenaming(true)}>
+                      Rename
+                    </Menu.Item>
+                  )}
                   {canGroup && (
                     <Menu.Sub>
                       <Menu.Sub.Target>

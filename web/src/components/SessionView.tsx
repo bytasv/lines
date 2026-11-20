@@ -28,6 +28,7 @@ import {
   IconGitBranch,
   IconInfoCircle,
   IconLogin,
+  IconPencil,
   IconPlayerPlay,
   IconPlayerStopFilled,
   IconShare,
@@ -50,6 +51,7 @@ import { Transcript } from './Transcript';
 import { transcriptHasMore } from '../lib/transcriptPage';
 import { clearTranscriptPageInFlight, requestTranscriptPage } from '../lib/transcriptBackfill';
 import { Composer } from './Composer';
+import { InlineSessionName } from './InlineSessionName';
 import { ReadOnlySessionNotice } from './ReadOnlySessionNotice';
 import { OfflineQueuedMessages, QueuedMessages, SendingMessages, SteeringMessages } from './QueuedMessages';
 import { WorkflowStepper } from './WorkflowStepper';
@@ -189,6 +191,11 @@ export function SessionView({ sessionId }: { sessionId: string }) {
   // Layout only: what the header can hold at 390px. Never a second decision
   // path — both branches call the same handlers.
   const isPhone = useIsPhone();
+  // Header title swapped in place for an input (double-click on desktop, "Rename"
+  // in the phone menu). Same gate as the sidebar row's archive.
+  const canRename = useCanOnSession(sessionId, 'manageSessions') && !session?.readOnly;
+  const [renaming, setRenaming] = useState(false);
+  useEffect(() => setRenaming(false), [sessionId]);
 
   if (!session) return null;
   // Both halves matter: the server says a sign-in is required, and the client
@@ -241,9 +248,24 @@ export function SessionView({ sessionId }: { sessionId: string }) {
               {clipboard.copied ? <IconCheck size={13} /> : <IconFolder size={13} />}
             </ActionIcon>
           </Tooltip>
-          <Text fw={600} size="sm" truncate style={{ minWidth: 0 }}>
-            {session.name}
-          </Text>
+          {renaming ? (
+            <InlineSessionName
+              sessionId={sessionId}
+              name={session.name}
+              fw={600}
+              onDone={() => setRenaming(false)}
+            />
+          ) : (
+            <Text
+              fw={600}
+              size="sm"
+              truncate
+              style={{ minWidth: 0 }}
+              onDoubleClick={canRename && !isPhone ? () => setRenaming(true) : undefined}
+            >
+              {session.name}
+            </Text>
+          )}
           {worktree && (
             <Group gap={3} wrap="nowrap" c="dimmed" style={{ flexShrink: 0 }}>
               <IconGitBranch size={12} />
@@ -258,7 +280,9 @@ export function SessionView({ sessionId }: { sessionId: string }) {
               same handlers — a second decision path here is how the two would
               drift. */}
           {isPhone ? (
-            <Menu position="bottom-end" width={220} withinPortal>
+            // No focus return: it would land on the ⋯ button after "Rename" and
+            // blur (so commit) the input that just took focus.
+            <Menu position="bottom-end" width={220} withinPortal returnFocus={false}>
               <Menu.Target>
                 <ActionIcon variant="subtle" color="gray" size="sm" aria-label="Session actions">
                   <IconDots size={16} />
@@ -274,6 +298,11 @@ export function SessionView({ sessionId }: { sessionId: string }) {
                       {formatSpendUsd(session.lastCostUsd, hasEstimatedSpend(session.costByModel))}
                     </Menu.Label>
                   )
+                )}
+                {canRename && (
+                  <Menu.Item leftSection={<IconPencil size={14} />} onClick={() => setRenaming(true)}>
+                    Rename
+                  </Menu.Item>
                 )}
                 {!access && SHARING_ENABLED && (
                   <Menu.Item leftSection={<IconShare size={14} />} onClick={() => setSharing(true)}>

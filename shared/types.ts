@@ -471,6 +471,9 @@ export type SessionStatus =
   | 'error';
 
 /** A live SDK turn is running and can be stopped via `interrupt`. */
+/** Longest session name a manual rename keeps (web input and bridge both cap at it). */
+export const SESSION_NAME_MAX = 100;
+
 export const isSessionInterruptible = (s: SessionStatus) =>
   s === 'running' || s === 'waiting-permission';
 
@@ -2685,6 +2688,7 @@ export const MESSAGE_AUTHZ: Record<ClientMessage['type'], MessageAuthz> = {
 
   // --- the session's lifecycle. Only Full access reaches these.
   archiveSession: { needs: 'session', cap: 'manageSessions' },
+  renameSession: { needs: 'session', cap: 'manageSessions' },
   unarchiveSession: { needs: 'session', cap: 'manageSessions' },
   setSessionGroup: { needs: 'session', cap: 'manageSessions' },
   // The sidebar's groups and manual order: part of the owner's settings, but the
@@ -2907,6 +2911,8 @@ export type ClientMessage =
   | { type: 'interjectQueued'; sessionId: string; queuedId: string }
   | { type: 'ackSession'; sessionId: string }
   | { type: 'archiveSession'; sessionId: string }
+  /** The user's own title for the session; the bridge trims it and caps it at SESSION_NAME_MAX. */
+  | { type: 'renameSession'; sessionId: string; name: string }
   | { type: 'unarchiveSession'; sessionId: string }
   | { type: 'setSessionGroup'; sessionId: string; groupId: string | null }
   /** Replace the machine's sidebar layout (see `SessionLayout`); each field present replaces that map. */

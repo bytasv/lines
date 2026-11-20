@@ -80,6 +80,7 @@ import {
   resultUsage,
   rewindBlock,
   rootsForCwd,
+  SESSION_NAME_MAX,
   subagentParentId,
 } from '@lines/shared';
 import { LINES_MCP_SERVER } from './mcpWorkflowTools.ts';
@@ -1496,6 +1497,12 @@ export class SessionManager {
    * LiveState.recovery — a restart in between simply keeps the fallback title.
    */
   private nameRetry = new Set<string>();
+  /**
+   * Sessions the user renamed by hand. An auto-name already in flight when the
+   * rename lands must not overwrite it (see autoName's apply). Live-only, like
+   * nameRetry: after a restart no auto-name is in flight any more.
+   */
+  private manualNamed = new Set<string>();
   /** Access token each live worker query was spawned with (see pushTurn). */
   private queryTokens = new Map<string, string | null>();
   /**
@@ -1921,6 +1928,23 @@ export class SessionManager {
     this.upsert(meta);
   }
 
+  /**
+   * The user's own title. Whitespace collapses and the name is capped at
+   * SESSION_NAME_MAX; an empty or unchanged name is a no-op. Clears `nameAuto`
+   * and any pending auto-name retry so the auto-namer never titles over it.
+   */
+  renameSession(id: string, name: string) {
+    const meta = this.sessions.get(id);
+    if (!meta || meta.readOnly) return;
+    const trimmed = name.replace(/\s+/g, ' ').trim().slice(0, SESSION_NAME_MAX).trim();
+    if (!trimmed || trimmed === meta.name) return;
+    meta.name = trimmed;
+    meta.nameAuto = false;
+    this.nameRetry.delete(id);
+    this.manualNamed.add(id);
+    this.upsert(meta);
+  }
+
   /** Mark done by the user: adds the completed indicator and archives. */
   completeSession(id: string) {
     const meta = this.sessions.get(id);
@@ -2066,6 +2090,8 @@ export class SessionManager {
     this.sessions.delete(id);
     this.live.delete(id);
     this.compacting.delete(id);
+    this.nameRetry.delete(id);
+    this.manualNamed.delete(id);
     this.store.deleteTranscript(id);
   }
 
@@ -4614,6 +4640,9 @@ export class SessionManager {
      * session" forever, since nothing retried and the catch wrote nothing.
      */
     const apply = (title: string) => {
+      // The user renamed it while the title query ran: their name wins, and a
+      // caller waiting on the name (the work-tree branch) gets theirs.
+      if (this.manualNamed.has(sessionId)) return settled(this.sessions.get(sessionId)?.name ?? '');
       if (!title) return settled('');
       const meta = this.sessions.get(sessionId);
       if (!meta) return;

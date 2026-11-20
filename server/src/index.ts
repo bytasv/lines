@@ -1729,6 +1729,9 @@ async function handleMessageImpl(ctx: UserContext, ws: BrowserLink, msg: ClientM
     case 'archiveSession':
       sessions.archiveSession(msg.sessionId);
       break;
+    case 'renameSession':
+      sessions.renameSession(msg.sessionId, typeof msg.name === 'string' ? msg.name : '');
+      break;
     case 'unarchiveSession':
       sessions.unarchiveSession(msg.sessionId);
       break;

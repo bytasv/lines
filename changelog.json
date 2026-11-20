@@ -1,6 +1,16 @@
 {
   "web": [
     {
+      "version": "0.1.47",
+      "date": "2026-11-20",
+      "items": [
+        {
+          "text": "You can now rename a session yourself: double-click its title in the sidebar or the session header, or choose Rename from its ⋯ menu on a phone.",
+          "image": "web-0.1.47-session-rename.png"
+        }
+      ]
+    },
+    {
       "version": "0.1.46",
       "date": "2026-11-20",
       "items": [

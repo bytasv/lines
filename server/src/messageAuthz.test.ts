@@ -125,8 +125,9 @@ describe('MESSAGE_AUTHZ', () => {
   });
 
   test('archive, complete and delete need Full access, not collaborator', () => {
-    const lifecycle = ['archiveSession', 'unarchiveSession', 'completeSession', 'deleteSession'] as const;
+    const lifecycle = ['archiveSession', 'unarchiveSession', 'renameSession', 'completeSession', 'deleteSession'] as const;
     assert.deepEqual(MESSAGE_AUTHZ.archiveSession, { needs: 'session', cap: 'manageSessions' });
+    assert.deepEqual(MESSAGE_AUTHZ.renameSession, { needs: 'session', cap: 'manageSessions' });
     assert.deepEqual(MESSAGE_AUTHZ.unarchiveSession, { needs: 'session', cap: 'manageSessions' });
     assert.deepEqual(MESSAGE_AUTHZ.completeSession, { needs: 'session', cap: 'manageSessions' });
     assert.deepEqual(MESSAGE_AUTHZ.deleteSession, { needs: 'session', cap: 'deleteSessions' });
@@ -141,6 +142,7 @@ describe('MESSAGE_AUTHZ', () => {
     // Archiving does not imply deleting: the caps are separate.
     const archiver = access({ manageSessions: true });
     assert.equal(authorizeMessage(msg('archiveSession'), archiver).ok, true);
+    assert.equal(authorizeMessage(msg('renameSession'), archiver).ok, true);
     assert.equal(authorizeMessage(msg('deleteSession'), archiver).ok, false);
   });
 

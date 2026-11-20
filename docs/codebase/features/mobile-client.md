@@ -218,8 +218,9 @@ an iPad in landscape is neither.
   Project paths distinguish duplicate names, while existing status indicators and management
   actions remain available. Management dialogs are owned above the responsive branch so resizing
   preserves them.
-- Phone session rows expose one labeled overflow menu. Existing action restrictions and delete
-  confirmations still apply, and opening the menu does not navigate to the session.
+- Phone session rows expose one labeled overflow menu, and the session header's "Session actions"
+  menu has a "Rename" item too. Existing action restrictions and delete confirmations still apply,
+  and opening the menu does not navigate to the session.
 - Bottom sheets use the same keyboard inset and safe-area spacing as the composer. Context details
   render inline inside Options so reading them does not require hover.
 - Browser checks should cover narrow widths (360, 390, and 430px), running and idle actions, draft
