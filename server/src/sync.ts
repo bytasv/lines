@@ -18,6 +18,7 @@ import type {
 } from '@lines/shared';
 import type { UntrustedMark } from '@lines/shared';
 import type { SyncWatermarks } from './store.ts';
+import type { LiveGrants, LiveMembership } from './guestGrants.ts';
 import {
   canonicalize,
   fileSignerStore,
@@ -1030,16 +1031,17 @@ export class StorageSyncClient {
   }
 
   /**
-   * The ids of every bridge grant behind a live share or invite on `deviceId`,
-   * as storage records them — or null when storage cannot say (no token, an
-   * error, or a server too old to record grant ids). Null is never "none": the
-   * caller reconciles only against an answer.
+   * What storage says is live on `deviceId`: the ids of every bridge grant behind
+   * a live share or invite, and every guest holding a live share (machine or
+   * session) — or null when storage cannot say (no token, an error, or a server
+   * too old to record grant ids). Null is never "none": the caller reconciles
+   * only against an answer. Invites are not memberships.
    */
-  async liveGrantIds(deviceId: string): Promise<Set<string> | null> {
+  async liveGrants(deviceId: string): Promise<LiveGrants | null> {
     if (!this.enabled) return null;
     let body: {
       grantTracking?: unknown;
-      granted?: { deviceId?: unknown; grantId?: unknown }[];
+      granted?: { kind?: unknown; deviceId?: unknown; grantId?: unknown; userId?: unknown; sessionId?: unknown }[];
       invites?: { deviceId?: unknown; grantId?: unknown }[];
     };
     try {
@@ -1055,7 +1057,14 @@ export class StorageSyncClient {
     for (const row of [...(body.granted ?? []), ...(body.invites ?? [])]) {
       if (row?.deviceId === deviceId && typeof row.grantId === 'string') ids.add(row.grantId);
     }
-    return ids;
+    const members: LiveMembership[] = [];
+    for (const row of body.granted ?? []) {
+      if (row?.deviceId !== deviceId || typeof row.userId !== 'string') continue;
+      if (row.kind === 'machine') members.push({ guestUserId: row.userId, scope: 'machine' });
+      else if (row.kind === 'session' && typeof row.sessionId === 'string')
+        members.push({ guestUserId: row.userId, scope: 'session', sessionId: row.sessionId });
+    }
+    return { ids, members };
   }
 
   /** Whole-map push; the server unions it into the stored map rather than replacing. */

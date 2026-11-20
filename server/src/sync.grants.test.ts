@@ -40,18 +40,38 @@ test('the ids of live shares and invites on this device, and only this device', 
       received: [],
     }),
   );
-  assert.deepEqual([...((await sync.liveGrantIds('dev-a')) ?? [])].sort(), ['g-invite', 'g-member']);
+  assert.deepEqual([...((await sync.liveGrants('dev-a'))?.ids ?? [])].sort(), ['g-invite', 'g-member']);
   assert.match(urls[0] ?? '', /\/v1\/shares$/);
+});
+
+test('members are this device\'s granted rows only: machine and session, never invites or other devices', async (t) => {
+  const { sync } = client(t, () =>
+    json({
+      grantTracking: true,
+      granted: [
+        { kind: 'machine', deviceId: 'dev-a', grantId: 'g-1', userId: 'u-machine' },
+        { kind: 'session', deviceId: 'dev-a', grantId: 'g-2', userId: 'u-session', sessionId: 's-1' },
+        { kind: 'machine', deviceId: 'dev-b', grantId: 'g-3', userId: 'u-elsewhere' },
+        { kind: 'machine', deviceId: 'dev-a', grantId: 'g-4' },
+      ],
+      invites: [{ deviceId: 'dev-a', grantId: 'g-invite', sessionId: null, inviteeEmail: 'x@example.com' }],
+      received: [],
+    }),
+  );
+  assert.deepEqual((await sync.liveGrants('dev-a'))?.members, [
+    { guestUserId: 'u-machine', scope: 'machine' },
+    { guestUserId: 'u-session', scope: 'session', sessionId: 's-1' },
+  ]);
 });
 
 test('an older storage server that records no grant ids is "cannot say", not "no shares"', async (t) => {
   const { sync } = client(t, () => json({ granted: [], invites: [], received: [] }));
-  assert.equal(await sync.liveGrantIds('dev-a'), null);
+  assert.equal(await sync.liveGrants('dev-a'), null);
 });
 
 test('an error is "cannot say" too', async (t) => {
   const { sync } = client(t, () => json({ error: 'boom' }, 503));
-  assert.equal(await sync.liveGrantIds('dev-a'), null);
+  assert.equal(await sync.liveGrants('dev-a'), null);
 });
 
 test('with no token there is nobody to ask', async (t) => {
@@ -65,6 +85,6 @@ test('with no token there is nobody to ask', async (t) => {
     return json({});
   }) as typeof fetch;
   const sync = new StorageSyncClient('http://storage.test', () => null, () => {}, {}, () => {}, { probeMs: 60_000 });
-  assert.equal(await sync.liveGrantIds('dev-a'), null);
+  assert.equal(await sync.liveGrants('dev-a'), null);
   assert.equal(asked, false);
 });

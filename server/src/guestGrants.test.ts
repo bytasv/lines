@@ -13,6 +13,7 @@ import {
   updateGuestGrants,
   type GuestGrantFile,
   type GuestGrantStore,
+  type LiveMembership,
 } from './guestGrants.ts';
 
 /**
@@ -198,6 +199,9 @@ describe('combineGrants: a guest with more than one share on a machine', () => {
   });
 });
 
+/** Storage's answer: the grant ids it lists, and who holds a live share. */
+const listed = (ids: string[] = [], members: LiveMembership[] = []) => ({ ids: new Set(ids), members });
+
 describe('reconcileGuestGrants: storage can take a grant away, never give one', () => {
   test('a grant whose share is gone from storage is dropped once past the grace period', () => {
     const store = memoryStore();
@@ -206,7 +210,7 @@ describe('reconcileGuestGrants: storage can take a grant away, never give one', 
     const gone = mintGuestGrant({ hostUserId: 'u-host', scope: 'machine', caps: machineCaps }, store, t0);
     redeemGuestGrant(gone.token, 'u-guest', store, t0);
     const later = t0 + GRANT_RECONCILE_GRACE_MS + 1;
-    const removed = reconcileGuestGrants('u-host', new Set([kept.id]), store, later);
+    const removed = reconcileGuestGrants('u-host', listed([kept.id]), store, later);
     assert.deepEqual(removed.map((g) => g.id), [gone.id]);
     assert.equal(redeemGuestGrant(gone.token, 'u-guest', store, later), null, 'revoked while offline, ended here too');
     assert.ok(redeemGuestGrant(kept.token, 'u-guest', store, later));
@@ -216,7 +220,7 @@ describe('reconcileGuestGrants: storage can take a grant away, never give one', 
     const store = memoryStore();
     const t0 = 5_000_000;
     const fresh = mintGuestGrant({ hostUserId: 'u-host', scope: 'machine', caps: machineCaps }, store, t0);
-    assert.deepEqual(reconcileGuestGrants('u-host', new Set(), store, t0 + 1000), []);
+    assert.deepEqual(reconcileGuestGrants('u-host', listed(), store, t0 + 1000), []);
     assert.ok(redeemGuestGrant(fresh.token, 'u-guest', store, t0 + 1000));
   });
 
@@ -224,7 +228,79 @@ describe('reconcileGuestGrants: storage can take a grant away, never give one', 
     const store = memoryStore();
     const t0 = 5_000_000;
     const other = mintGuestGrant({ hostUserId: 'u-other', scope: 'machine', caps: machineCaps }, store, t0);
-    assert.deepEqual(reconcileGuestGrants('u-host', new Set(), store, t0 + GRANT_RECONCILE_GRACE_MS + 1), []);
+    assert.deepEqual(reconcileGuestGrants('u-host', listed(), store, t0 + GRANT_RECONCILE_GRACE_MS + 1), []);
     assert.ok(redeemGuestGrant(other.token, 'u-guest', store, t0 + GRANT_RECONCILE_GRACE_MS + 1));
+  });
+
+  test('a re-claim moved storage\'s grant id elsewhere: the bound guest still a member keeps the old grant', () => {
+    const store = memoryStore();
+    const t0 = 5_000_000;
+    const old = mintGuestGrant({ hostUserId: 'u-host', scope: 'machine', caps: machineCaps }, store, t0);
+    redeemGuestGrant(old.token, 'u-guest', store, t0);
+    const later = t0 + GRANT_RECONCILE_GRACE_MS + 1;
+    const live = listed(['g-newer'], [{ guestUserId: 'u-guest', scope: 'machine' }]);
+    assert.deepEqual(reconcileGuestGrants('u-host', live, store, later), []);
+    assert.ok(redeemGuestGrant(old.token, 'u-guest', store, later));
+  });
+
+  test('a session grant stays while one of its sessions is still shared, and goes once none are', () => {
+    const store = memoryStore();
+    const t0 = 5_000_000;
+    const grant = mintGuestGrant(
+      { hostUserId: 'u-host', scope: 'session', sessionIds: ['s-1', 's-2'], caps: sessionCaps },
+      store,
+      t0,
+    );
+    redeemGuestGrant(grant.token, 'u-guest', store, t0);
+    const later = t0 + GRANT_RECONCILE_GRACE_MS + 1;
+    const stillShared = listed([], [{ guestUserId: 'u-guest', scope: 'session', sessionId: 's-2' }]);
+    assert.deepEqual(reconcileGuestGrants('u-host', stillShared, store, later), []);
+    const otherSession = listed([], [{ guestUserId: 'u-guest', scope: 'session', sessionId: 's-3' }]);
+    assert.deepEqual(reconcileGuestGrants('u-host', otherSession, store, later).map((g) => g.id), [grant.id]);
+  });
+
+  test('scope must match: a session share does not keep a machine grant, nor the reverse', () => {
+    const store = memoryStore();
+    const t0 = 5_000_000;
+    const machine = mintGuestGrant({ hostUserId: 'u-host', scope: 'machine', caps: machineCaps }, store, t0);
+    const session = mintGuestGrant(
+      { hostUserId: 'u-host', scope: 'session', sessionIds: ['s-1'], caps: sessionCaps },
+      store,
+      t0,
+    );
+    redeemGuestGrant(machine.token, 'u-guest', store, t0);
+    redeemGuestGrant(session.token, 'u-guest', store, t0);
+    const later = t0 + GRANT_RECONCILE_GRACE_MS + 1;
+    const onlySession = listed([], [{ guestUserId: 'u-guest', scope: 'session', sessionId: 's-1' }]);
+    assert.deepEqual(reconcileGuestGrants('u-host', onlySession, store, later).map((g) => g.id), [machine.id]);
+
+    const store2 = memoryStore();
+    const session2 = mintGuestGrant(
+      { hostUserId: 'u-host', scope: 'session', sessionIds: ['s-1'], caps: sessionCaps },
+      store2,
+      t0,
+    );
+    redeemGuestGrant(session2.token, 'u-guest', store2, t0);
+    const onlyMachine = listed([], [{ guestUserId: 'u-guest', scope: 'machine' }]);
+    assert.deepEqual(reconcileGuestGrants('u-host', onlyMachine, store2, later).map((g) => g.id), [session2.id]);
+  });
+
+  test('another guest\'s share keeps nothing alive for this one', () => {
+    const store = memoryStore();
+    const t0 = 5_000_000;
+    const grant = mintGuestGrant({ hostUserId: 'u-host', scope: 'machine', caps: machineCaps }, store, t0);
+    redeemGuestGrant(grant.token, 'u-guest-a', store, t0);
+    const later = t0 + GRANT_RECONCILE_GRACE_MS + 1;
+    const live = listed([], [{ guestUserId: 'u-guest-b', scope: 'machine' }]);
+    assert.deepEqual(reconcileGuestGrants('u-host', live, store, later).map((g) => g.id), [grant.id]);
+  });
+
+  test('an unbound grant is never spared by a membership, only by its own id', () => {
+    const store = memoryStore();
+    const t0 = 5_000_000;
+    const unbound = mintGuestGrant({ hostUserId: 'u-host', scope: 'machine', caps: machineCaps }, store, t0);
+    const later = t0 + GRANT_RECONCILE_GRACE_MS + 1;
+    const live = listed([], [{ guestUserId: 'u-guest', scope: 'machine' }]);
+    assert.deepEqual(reconcileGuestGrants('u-host', live, store, later).map((g) => g.id), [unbound.id]);
   });
 });

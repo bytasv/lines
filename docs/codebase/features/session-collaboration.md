@@ -118,7 +118,7 @@ Delivery is proposed, not built — see
   `handleMessage` authz gate, `conns` (carries `access`+`connId`, and a guest's `grantIds`), the
   `presence` case; the `mintGuestGrant`/`updateGuestGrant`/`revokeGuestGrant` cases,
   `closeGuestSockets`, the `reconcileGrants` interval
-- `server/src/sync.ts` — `liveGrantIds`, the grant ids storage still lists for this device
+- `server/src/sync.ts` — `liveGrants`, the grant ids and live memberships storage still lists for this device
 - `server/src/userContext.ts` — `sockets: Map<BrowserLink, SocketAccess>`, `sessionIdOf`,
   `mayReceive` (the scoped broadcast fan-out), `PresenceTracker`
 - `server/src/presence.ts` — `PresenceTracker`
@@ -229,8 +229,9 @@ Delivery is proposed, not built — see
   host's grants matching a `GrantMatch` (`grantId`, `guestUserId`, `sessionId`: `null` = the
   machine grant); a match naming neither a grant nor a guest matches nothing. Both return what
   changed, so the sockets admitted on it can be closed
-- `reconcileGuestGrants(hostUserId, liveGrantIds)` — drops the host's grants storage no longer
-  lists, sparing any younger than `GRANT_RECONCILE_GRACE_MS` (10 minutes); only ever removes
+- `reconcileGuestGrants(hostUserId, live)` — drops the host's grants storage no longer lists,
+  sparing any younger than `GRANT_RECONCILE_GRACE_MS` (10 minutes) and any bound grant whose guest
+  still holds a live share of matching scope; only ever removes
 - `combineGrants(grants)` — what several grants for one guest add up to: the widest
 - `guestAccessFor(grant, attested)` — the grant intersected with the relay's attestation, or null
   when nothing is left
@@ -240,8 +241,8 @@ Delivery is proposed, not built — see
   socket admitted on any of those grants, and drops their guest push rows (`dropGuestGrants`)
 - `PushNotifier.registerGuest` / `dropGuestGrants` / `guestMayPush` (`server/src/pushNotifier.ts`) —
   a guest's Web Push row, pushed only for sessions inside its reach
-- `StorageSyncClient.liveGrantIds(deviceId)` — the grant ids behind this device's live shares and
-  invites, or null for "cannot say" (no token, an error, or a storage server without
+- `StorageSyncClient.liveGrants(deviceId)` — the grant ids behind this device's live shares and
+  invites, plus the guests holding a live machine or session share, or null for "cannot say" (no token, an error, or a storage server without
   `grantTracking`)
 - `takeJoinGrantFromUrl(code)` / `parseJoinLink(input)` / `stashJoinGrant(grant)` /
   `pendingJoinGrantDevice()` / `adoptJoinGrant(deviceId, code?)` / `guestGrantTokens(deviceId)`
@@ -331,8 +332,10 @@ itself, so a relay that merely *says* someone is a guest gets nowhere.
    machine not yet.
 7. **Reconciling.** Every 60s (`GRANT_RECONCILE_MS`) a relaying bridge asks storage, for each
    account context holding a token, which grant ids still back a live share or invite on this
-   device (`liveGrantIds`, from `GET /v1/shares`), drops the rest (`reconcileGuestGrants`) and
-   closes their sockets. That catches a share revoked from a phone while this machine slept, and
+   device (`liveGrants`, from `GET /v1/shares`), drops the rest (`reconcileGuestGrants`) and
+   closes their sockets. A bound grant stays while its guest still holds a live share of matching
+   scope, because a re-claim moves storage's single grant id to the new grant while the guest's
+   browser still holds the old token. That catches a share revoked from a phone while this machine slept, and
    an invite cancelled from another browser. It only ever removes. A storage server that does not
    say `grantTracking: true`, or any error, means "cannot say" and touches nothing, and a grant
    younger than 10 minutes is spared, because the browser mints it before the invite exists in
@@ -667,7 +670,9 @@ resolves a person through — so they can never disagree about who somebody is.
   it yet.
 - `adoptJoinGrant` binds a grant only to the machine the link named and only for that invite's
   code, and never replaces a different key already pinned for that machine.
-- Reconciliation only ever removes grants: it acts only on a storage answer carrying
+- Reconciliation only ever removes grants, and a bound grant survives while its guest holds a live
+  share of matching scope: storage tracks one grant id per membership row, so a re-claim moves that
+  id away from the token the guest still holds. It acts only on a storage answer carrying
   `grantTracking: true`, treats any failure as "cannot say", and spares grants younger than
   `GRANT_RECONCILE_GRACE_MS` (10 minutes), since an invite reaches storage only after its grant is
   minted.
@@ -733,7 +738,7 @@ resolves a person through — so they can never disagree about who somebody is.
   nothing anyone could present. The store is injectable (`GuestGrantStore`), like the signer
   store, so the policy is tested from a temp directory rather than `~/.lines-app`.
 - Storage keeps grant ids, never tokens, and nothing it says can create or widen a grant.
-  `liveGrantIds` reads `GET /v1/shares` unsigned and soft-failing for exactly that reason: an
+  `liveGrants` reads `GET /v1/shares` unsigned and soft-failing for exactly that reason: an
   answer can only drop grants, and a failure must not raise the storage-outage banner.
 - `guestGrantMinted` is handled point to point in `ws.ts`, like `fileResponse`, and never reaches
   the store; besides the machine's hash, the token rests only in the invite link and in the

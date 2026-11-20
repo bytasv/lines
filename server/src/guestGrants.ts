@@ -219,6 +219,34 @@ export function revokeGuestGrants(
  */
 export const GRANT_RECONCILE_GRACE_MS = 10 * 60_000;
 
+/** A live share storage lists for one guest on this machine: the whole machine, or one session. */
+export type LiveMembership =
+  | { guestUserId: string; scope: 'machine' }
+  | { guestUserId: string; scope: 'session'; sessionId: string };
+
+/** What storage says is live on this machine: grant ids behind shares and invites, and who holds a share. */
+export interface LiveGrants {
+  ids: ReadonlySet<string>;
+  members: readonly LiveMembership[];
+}
+
+/**
+ * Whether a bound grant's guest still holds a live share of the grant's scope.
+ * Storage keeps one grant id per membership row, so a later claim by the same
+ * guest (a fresh invite accepted from the pairing card, without its link) moves
+ * that id to the new grant while the guest's browser still holds only the old
+ * token. The share is the same; the old grant must not die with the id.
+ */
+function coveredByMembership(g: GuestGrantRecord, members: readonly LiveMembership[]): boolean {
+  if (g.guestUserId === null) return false;
+  const sessions = new Set(g.sessionIds ?? []);
+  return members.some(
+    (m) =>
+      m.guestUserId === g.guestUserId &&
+      (g.scope === 'machine' ? m.scope === 'machine' : m.scope === 'session' && sessions.has(m.sessionId)),
+  );
+}
+
 /**
  * Drop this host's grants that storage no longer lists, and return them.
  *
@@ -227,17 +255,29 @@ export const GRANT_RECONCILE_GRACE_MS = 10 * 60_000;
  * cancelled from another browser, reaches the grant here on the next pull rather
  * than never. Only ever removes: storage can take a grant away this way, and
  * cannot create or widen one. Grants younger than the grace period are kept.
+ *
+ * A bound grant also stays while its guest still holds a live share of matching
+ * scope, even when storage's single grant id for that share now names another
+ * grant. Safe because only the bound account can redeem it; its reach is still
+ * intersected with the relay's attestation in guestAccessFor, so a stale wider
+ * ceiling cannot exceed the current preset; revoking tombstones the share, so
+ * coverage goes and the next sweep drops it. Unbound grants depend on their id
+ * alone: a pending invite is decided by the invite row.
  */
 export function reconcileGuestGrants(
   hostUserId: string,
-  liveGrantIds: ReadonlySet<string>,
+  listed: LiveGrants,
   store: GuestGrantStore = fileGrantStore,
   now = Date.now(),
   graceMs = GRANT_RECONCILE_GRACE_MS,
 ): GuestGrantRecord[] {
   const grants = live(store.load(), now);
   const removed = Object.values(grants).filter(
-    (g) => g.hostUserId === hostUserId && g.createdAt + graceMs <= now && !liveGrantIds.has(g.id),
+    (g) =>
+      g.hostUserId === hostUserId &&
+      g.createdAt + graceMs <= now &&
+      !listed.ids.has(g.id) &&
+      !coveredByMembership(g, listed.members),
   );
   for (const g of removed) delete grants[g.id];
   if (removed.length) store.save(grants);

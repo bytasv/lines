@@ -691,11 +691,13 @@ if (RELAY_URL) {
 async function reconcileGrants(deviceId: string): Promise<void> {
   for (const ctx of registry.all()) {
     if (ctx.userId === LOCAL_USER || !ctx.clerkToken) continue;
-    const live = await ctx.sync.liveGrantIds(deviceId).catch(() => null);
+    const live = await ctx.sync.liveGrants(deviceId).catch(() => null);
     if (!live) continue;
     const removed = reconcileGuestGrants(ctx.userId, live);
     if (!removed.length) continue;
-    console.log(`[share] dropped ${removed.length} guest grant(s) storage no longer lists`);
+    console.log(
+      `[share] dropped ${removed.length} guest grant(s) storage no longer lists: ${removed.map((g) => g.id).join(', ')}`,
+    );
     closeGuestSockets(ctx, new Set(removed.map((g) => g.id)), 'share revoked');
   }
 }
