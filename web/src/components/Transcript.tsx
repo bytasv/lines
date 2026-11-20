@@ -85,6 +85,10 @@ import { ToolGroup } from './ToolGroup';
 import { PermissionPrompt } from './PermissionPrompt';
 import { ActivityRow } from './ActivityRow';
 import { ConfirmModal } from './ConfirmModal';
+import { TurnChecklist } from './TurnChecklist';
+import { Reveal } from './Reveal';
+import { useChangeKey } from '../lib/useChangeKey';
+import { taskCarries, turnSteps, type TaskState } from '../lib/turnSteps';
 
 /**
  * A workflow marker the transcript renders. Only the load-bearing ones do — see
@@ -800,6 +804,8 @@ const Item = memo(function Item({
   activeTurnKey,
   liveCompactKey,
   inTurn,
+  taskCarry,
+  atTail,
 }: {
   item: TranscriptItem;
   sessionId: string;
@@ -819,6 +825,10 @@ const Item = memo(function Item({
   /** This row is a child of an `agent-turn` card (Compact level). A successful
    *  result renders nothing there — the turn header already carries its figures. */
   inTurn?: boolean;
+  /** An `agent-turn`'s open tasks carried in from earlier turns (see taskCarries). */
+  taskCarry?: readonly TaskState[];
+  /** The live `agent-turn` is still the transcript's last item (see AgentTurn). */
+  atTail?: boolean;
 }) {
   const showRetry = item.key === retryKey;
   const isActiveGroup = item.key === activeGroupKey;
@@ -876,6 +886,8 @@ const Item = memo(function Item({
           renderNested={renderNested}
           retryKey={retryKey}
           activeGroupKey={activeGroupKey}
+          taskCarry={taskCarry}
+          atTail={!!atTail}
         />
       );
     case 'streaming':
@@ -1043,6 +1055,8 @@ const AgentTurn = memo(function AgentTurn({
   renderNested,
   retryKey,
   activeGroupKey,
+  taskCarry,
+  atTail,
 }: {
   turn: AgentTurnItem;
   active: boolean;
@@ -1051,15 +1065,9 @@ const AgentTurn = memo(function AgentTurn({
   renderNested: (items: TranscriptItem[]) => ReactNode;
   retryKey?: string | null;
   activeGroupKey?: string | null;
+  taskCarry?: readonly TaskState[];
+  atTail: boolean;
 }) {
-  const k = `${sessionId}:${turn.key}`;
-  const [override, setOverride] = useState<boolean | null>(() => turnOverrides.get(k) ?? null);
-  const expanded = override ?? active;
-  const toggle = () => {
-    turnOverrides.set(k, !expanded);
-    setOverride(!expanded);
-  };
-
   const turnSummariesEnabled = useStore((s) => s.turnSummariesEnabled);
   // A boolean selector, so a memoized turn card only re-renders when the flag flips.
   const estimated = useStore((s) => hasEstimatedSpend(s.sessions[sessionId]?.costByModel));
@@ -1072,6 +1080,85 @@ const AgentTurn = memo(function AgentTurn({
     () => turnToolStats(turn.items),
     [turn.items],
   );
+  // The turn as checklist steps; `turn.items` keeps its identity across rebuilds
+  // that didn't touch this turn (reconcileItems), so this holds.
+  // Steps are live only while the card is the transcript's tail. Once the answer
+  // streams in below it (or a decision card follows), the agent has moved past
+  // them: the last step settles to done instead of shimmering under the answer.
+  const stepsLive = active && atTail;
+  const entries = useMemo(
+    () => turnSteps(turn.items, stepsLive, taskCarry),
+    [turn.items, stepsLive, taskCarry],
+  );
+  const steps = entries.filter((e) => e.kind === 'step');
+  // A turn with no step (only passthrough items) renders its items as before.
+  const checklist = steps.length > 0;
+  const k = `${sessionId}:${turn.key}`;
+  const [override, setOverride] = useState<boolean | null>(() => turnOverrides.get(k) ?? null);
+  const expanded = override ?? active;
+  const toggle = () => {
+    turnOverrides.set(k, !expanded);
+    setOverride(!expanded);
+  };
+  const renderItem = useCallback(
+    (child: TranscriptItem) => (
+      <Item
+        item={child}
+        sessionId={sessionId}
+        onImage={onImage}
+        renderNested={renderNested}
+        retryKey={retryKey}
+        activeGroupKey={activeGroupKey}
+        inTurn
+      />
+    ),
+    [sessionId, onImage, renderNested, retryKey, activeGroupKey],
+  );
+
+  // The cost and time the header used to carry; on a checklist they sit at the
+  // end of the last row instead.
+  const costText =
+    result?.costUsd != null
+      ? formatSpendUsd(result.costUsd, estimated)
+      : !result && liveSpend
+        ? formatSpendUsd(liveSpend.costUsd, true)
+        : null;
+  const durationText = result?.durationMs != null ? formatDuration(result.durationMs) : null;
+
+  // The AI summary, once the server has written one, says what the turn amounted
+  // to. It lands after the turn ends, so it animates when it arrives (not on mount).
+  const turnSummary = checklist && !active && turnSummariesEnabled ? narrative : null;
+  const summaryKey = useChangeKey(turnSummary ?? '');
+
+  if (checklist) {
+    // No header row: the steps are the turn.
+    return (
+      <Box>
+        {turnSummary && (
+          // Lands above the rows after the turn ends: grows in, so the rows slide down.
+          <Reveal key={summaryKey} on={summaryKey > 0}>
+            <Text size="xs" c="dimmed" mb={2}>
+              {turnSummary}
+            </Text>
+          </Reveal>
+        )}
+        <TurnChecklist
+          entries={entries}
+          sessionId={sessionId}
+          renderItem={renderItem}
+          live={stepsLive}
+          meta={
+            costText || durationText ? (
+              <Text size="xs" c="dimmed">
+                {[costText, durationText].filter(Boolean).join(' · ')}
+              </Text>
+            ) : null
+          }
+        />
+      </Box>
+    );
+  }
+
   // AI narrative (if enabled) > the agent's own narration > tool tally > generic fallback.
   const headline = (turnSummariesEnabled ? narrative : null) ?? narration ?? summary ?? 'response';
   const isHeadlineSentence = headline !== summary || headline === 'response';
@@ -1119,21 +1206,14 @@ const AgentTurn = memo(function AgentTurn({
           )}
           {/* What the turn cost, where the result row used to say it — the success
               row renders nothing inside the card now. */}
-          {result?.costUsd != null ? (
+          {costText && (
             <Text size="xs" c="dimmed">
-              {formatSpendUsd(result.costUsd, estimated)}
+              {costText}
             </Text>
-          ) : (
-            !result &&
-            liveSpend && (
-              <Text size="xs" c="dimmed">
-                {formatSpendUsd(liveSpend.costUsd, true)}
-              </Text>
-            )
           )}
-          {result?.durationMs != null && (
+          {durationText && (
             <Text size="xs" c="dimmed">
-              {formatDuration(result.durationMs)}
+              {durationText}
             </Text>
           )}
           {active && <Loader size={12} />}
@@ -1163,6 +1243,26 @@ const AgentTurn = memo(function AgentTurn({
     </Box>
   );
 });
+
+/** How long the activity row must be wanted before it shows (see useSettledTrue). */
+const ACTIVITY_SETTLE_MS = 250;
+
+/**
+ * `value`, except that it turns true only after staying true for `ms`. It turns
+ * false at once.
+ */
+function useSettledTrue(value: boolean, ms: number): boolean {
+  const [settled, setSettled] = useState(false);
+  useEffect(() => {
+    if (!value) {
+      setSettled(false);
+      return;
+    }
+    const t = setTimeout(() => setSettled(true), ms);
+    return () => clearTimeout(t);
+  }, [value, ms]);
+  return value && settled;
+}
 
 /** Top-level items rendered on first paint, and the size of each backfill step. */
 const INITIAL_WINDOW = 40;
@@ -1264,6 +1364,9 @@ export function Transcript({
     const kept = items.filter(
       (it) =>
         !(it.kind === 'permission' && isRedundant(it)) &&
+        // "session started · <model>" right under the prompt says nothing the session
+        // header doesn't; only a model change is news.
+        !(it.kind === 'system-init' && !it.changed) &&
         !(it.kind === 'workflow' && isNoisyWorkflowMarker(it.data)),
     );
     builtRef.current = reconcileItems(builtRef.current, kept);
@@ -1277,6 +1380,13 @@ export function Transcript({
     foldedRef.current = reconcileItems(foldedRef.current, foldAgentTurns(built));
     return foldedRef.current;
   }, [built, compactionLevel]);
+  // The agent's open tasks at the start of each folded turn (Compact only). Fed the
+  // previous map so an unchanged turn keeps its array and its memoized row.
+  const taskCarryRef = useRef<ReadonlyMap<string, readonly TaskState[]>>(new Map());
+  const taskCarry = useMemo(() => {
+    taskCarryRef.current = compactionLevel === 'compact' ? taskCarries(items, taskCarryRef.current) : new Map();
+    return taskCarryRef.current;
+  }, [items, compactionLevel]);
   const status = useStore((s) => s.sessions[sessionId]?.status);
   const turnStartedAt = useStore((s) => s.sessions[sessionId]?.turnStartedAt);
   const lastEventAt = useStore((s) => s.lastEventAt[sessionId]);
@@ -1297,6 +1407,9 @@ export function Transcript({
     if (status !== 'running' && status !== 'waiting-permission') return null;
     for (let i = items.length - 1; i >= 0; i--) {
       if (items[i].kind === 'agent-turn') return items[i].key;
+      // A card above the newest prompt is the previous, finished turn: until the
+      // new turn has a card of its own, no card is live (the activity row is).
+      if (items[i].kind === 'user') return null;
     }
     return null;
   }, [items, status]);
@@ -1327,10 +1440,22 @@ export function Transcript({
     // until the revision lands; a second loader down here would read as a chat
     // reply on the way.
     if (proposalUpdating(items)) return false;
+    // A live turn card is its own indicator: its in-progress step shimmers. Only a
+    // long write the checklist can't name yet (the plan, a UI mock) still gets the row.
+    if (
+      last.key === activeTurnKey &&
+      !(live?.phase === 'tool-prep' && (live.toolName === 'ExitPlanMode' || live.toolName === PROPOSE_UI_TOOL))
+    ) {
+      return false;
+    }
     const phaseOverride = live?.phase === 'thinking' || live?.phase === 'tool-prep';
-    if (!phaseOverride && (last.key === activeGroupKey || last.key === activeTurnKey)) return false;
+    if (!phaseOverride && last.key === activeGroupKey) return false;
     return true;
   }, [items, status, live, activeGroupKey, activeTurnKey]);
+  // The row appears only once it has been wanted for a moment, and goes at once.
+  // Some tail states last a few milliseconds (an answer done, its result not yet
+  // in): without this the row would grow in and vanish again right away.
+  const activitySettled = useSettledTrue(showActivity, ACTIVITY_SETTLE_MS);
   // Fallback for sessions that predate turnStartedAt: the last user prompt's ts.
   const activityStartedAt = useMemo(() => {
     if (turnStartedAt != null) return turnStartedAt;
@@ -1799,11 +1924,19 @@ export function Transcript({
                   activeGroupKey={activeGroupKey}
                   activeTurnKey={activeTurnKey}
                   liveCompactKey={liveCompactKey}
+                  taskCarry={item.kind === 'agent-turn' ? taskCarry.get(item.key) : undefined}
+                  atTail={item.kind === 'agent-turn' && item.key === activeTurnKey && item === items.at(-1)}
                 />
               </div>
             ))}
-            {showActivity && (
-              <ActivityRow startedAt={activityStartedAt} live={live} lastEventAt={lastEventAt} />
+            {activitySettled && (
+              <ActivityRow
+                step
+                sessionId={sessionId}
+                startedAt={activityStartedAt}
+                live={live}
+                lastEventAt={lastEventAt}
+              />
             )}
           </Stack>
         </TranscriptAnchorContext.Provider>

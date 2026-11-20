@@ -1101,7 +1101,8 @@ function reuseTool(old: ToolBlock, next: ToolBlock): ToolBlock {
  * Compact level: fold each agent turn (everything the agent produced between one
  * user prompt and the next boundary) into a single collapsible `agent-turn` item.
  * User prompts, session-init, and workflow dividers are boundaries that stay visible.
- * A lone agent item passes through un-wrapped (avoids chrome around a single answer).
+ * A lone agent item passes through un-wrapped (avoids chrome around a single answer),
+ * except a tool group, which is a turn's first step.
  * The plan-review card is also a boundary so a pending plan is always presented
  * as its own item — exploration folds away, the plan stays visible. An
  * AskUserQuestion card gets the same treatment: the question and the answer are a
@@ -1112,7 +1113,9 @@ export function foldAgentTurns(items: TranscriptItem[]): TranscriptItem[] {
   let buf: TranscriptItem[] = [];
   const emitFolded = (turn: TranscriptItem[]) => {
     if (turn.length === 0) return;
-    if (turn.length === 1) out.push(turn[0]);
+    // A lone tool group still folds: the turn card's checklist is how a turn shows
+    // progress, and a live turn starts as exactly one group.
+    if (turn.length === 1 && turn[0].kind !== 'tool-group') out.push(turn[0]);
     else out.push({ kind: 'agent-turn', key: `t${turn[0].key}`, items: turn });
   };
   const flush = () => {
@@ -1120,19 +1123,21 @@ export function foldAgentTurns(items: TranscriptItem[]): TranscriptItem[] {
     // A turn's terminal answer (last assistant text not followed by a tool call) always shows
     // standalone — folding it away hides the analysis/conclusion. Scan from the end, skipping
     // trailing non-text items (e.g. result); stop at the first tool-group (then no answer).
+    // Text still streaming counts too: it renders where the finished answer will, so the
+    // answer streams in place instead of filling a folded card and jumping out at the end.
     let splitIdx = -1;
     for (let i = buf.length - 1; i >= 0; i--) {
       const it = buf[i];
       if (it.kind === 'tool-group') break;
-      if (it.kind === 'assistant' && hasText(it)) {
+      if ((it.kind === 'assistant' && hasText(it)) || it.kind === 'streaming') {
         splitIdx = i;
         break;
       }
     }
     if (splitIdx >= 0) {
-      const answer = buf[splitIdx] as Extract<TranscriptItem, { kind: 'assistant' }>;
+      const answer = buf[splitIdx];
       emitFolded(buf.filter((_, i) => i !== splitIdx));
-      out.push({ ...answer, isAnswer: true });
+      out.push(answer.kind === 'assistant' ? { ...answer, isAnswer: true } : answer);
     } else {
       emitFolded(buf);
     }

@@ -440,6 +440,9 @@ rules (`curl … | sh`) are re-tested with the masked commands joined by a pipe.
 Harness tools that only observe or delegate (the plan-mode read set: `Agent`, `Skill`, `Task*`,
 `SendMessage`, `ToolSearch`, `ListAgents`, `WebFetch`, `WebSearch`, plus `Glob`, `Grep`,
 `TodoWrite`, `KillShell`) are not dangerous in auto mode. `Monitor` is checked like `Bash`.
+Outside auto mode, the read-only set that `isSafeReadOnly` checks (`READ_ONLY_TOOLS`) also holds the
+agent's own task list (`TaskCreate`, `TaskUpdate`, `TaskGet`, `TaskList`), so keeping a checklist raises no
+permission card.
 
 A command skips the rules only when an entry covers it (`segmentAllowed`), and only a plain simple
 command can be covered: one carrying `|`, `&`, `<`, `>`, a backtick, `$(` or a line break

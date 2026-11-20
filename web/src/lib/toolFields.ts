@@ -1,4 +1,4 @@
-import type { ToolBlock } from './transcript';
+import type { ToolBlock } from './transcript.ts';
 
 /**
  * Cap on any single rendered value. Tool inputs are unbounded — a Task prompt is

@@ -1,6 +1,16 @@
 {
   "web": [
     {
+      "version": "0.1.45",
+      "date": "2026-11-20",
+      "items": [
+        {
+          "text": "At the Compact level, each Claude turn is now a checklist of its steps, done, in progress or failed, and you click a step to see its tool calls.",
+          "image": "web-0.1.45-turn-checklist.png"
+        }
+      ]
+    },
+    {
       "version": "0.1.44",
       "date": "2026-11-18",
       "items": [
@@ -492,5 +502,10 @@
       ]
     }
   ],
-  "desktopPending": []
+  "desktopPending": [
+    {
+      "text": "Claude now lays out a task list for multi-step requests, so the turn's checklist shows the planned steps up front and ticks them off as it works.",
+      "image": "desktop-next-task-list.png"
+    }
+  ]
 }

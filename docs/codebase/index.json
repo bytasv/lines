@@ -1426,7 +1426,14 @@
         "web/src/lib/transcriptAnchor.ts",
         "web/src/lib/appTokens.ts",
         "web/public/html-preview.html",
-        "web/public/html-preview.js"
+        "web/public/html-preview.js",
+        "web/src/lib/turnSteps.ts",
+        "web/src/components/TurnChecklist.tsx",
+        "web/src/components/Reveal.tsx",
+        "web/src/components/CrossfadeLine.tsx",
+        "web/src/components/ShimmerText.tsx",
+        "web/src/lib/useChangeKey.ts",
+        "web/src/lib/activityHandoff.ts"
       ],
       "symbols": [
         "Markdown",
@@ -1474,12 +1481,28 @@
         "proposalOutcome",
         "pickedProposals",
         "TranscriptAnchorContext",
-        "proposalUpdating"
+        "proposalUpdating",
+        "turnSteps",
+        "taskCarries",
+        "TurnChecklist",
+        "TurnStep",
+        "TurnPassthrough",
+        "TurnEntry",
+        "TaskState",
+        "narrationLabel",
+        "Reveal",
+        "CrossfadeLine",
+        "ShimmerText",
+        "useChangeKey",
+        "recordActivity",
+        "clearActivity",
+        "activityOnScreen"
       ],
       "tests": [
         "server/src/sessions.turns.test.ts",
         "server/src/sessions.context.test.ts",
-        "server/src/markdownImage.test.ts"
+        "server/src/markdownImage.test.ts",
+        "server/src/turnSteps.test.ts"
       ],
       "businessRules": [
         "user and agent text render markdown instead of plain preformatted text; single newlines collapse and raw HTML tags are dropped",
@@ -1517,7 +1540,11 @@
         "'plan-chat' events attach to the ExitPlanMode permission item they name and never render as rows of their own",
         "a propose_ui call is never folded into a tool group or a turn, and stays visible until answered",
         "a revision (revise: true with the same title) replaces versions by label in place; the earlier card folds to one line and every earlier revision of a version stays reachable",
-        "Focus keeps every version's frame mounted and stacked, so switching versions never reloads a page or changes the card's height"
+        "Focus keeps every version's frame mounted and stacked, so switching versions never reloads a page or changes the card's height",
+        "a pending permission and a failed or stopped result never hide inside a turn checklist step; they render between rows and a failed result keeps its Retry action",
+        "a checklist step's open state is sticky per session and every step starts closed, including the live one",
+        "a checklist turn has no header line: its cost and duration sit on the last row, and the AI turn summary shows above the rows once the turn ends",
+        "a task list is a presentation source only: no event is added, and old transcripts with task calls reflow on reload"
       ],
       "architecturalRules": [
         "user and agent transcript text share one markdown renderer instead of separate text-rendering paths; ColorizedText.tsx deleted as dead code",
@@ -1544,7 +1571,8 @@
         "the mouse and keyboard paths both fold through one advance() function; the click path passes canSubmit: false so clicking the last unanswered option can move focus but never itself fires the WS send",
         "markdown images are placeholders because an image fetches on render with nobody clicking, so a prompt-injected agent could exfiltrate data just by writing an image URL; links wait for a click and are left alone; the deployed CSP is now enforcing and its img-src admits no arbitrary host, the same channel closed one layer down (see production-deployment)",
         "markdownImageTarget is pure (web/src/lib, no React) so the server's test runner covers it; a protocol-relative //host URL is classed as remote via isExternalHref, never as a local path",
-        "proposal frames reuse the file preview's sandboxed shell (/html-preview.html); the CSP and sandbox are unchanged for transcript mocks"
+        "proposal frames reuse the file preview's sandboxed shell (/html-preview.html); the CSP and sandbox are unchanged for transcript mocks",
+        "turnSteps.ts stays importable by the server's node runner: no imports that pull in JSX, so isAgentTool's spawn-name check and the description fallback are copied there rather than imported from agents.ts"
       ],
       "relatedDecisions": [
         "session-collaboration",

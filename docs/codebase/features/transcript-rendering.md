@@ -88,8 +88,21 @@ How everything in the transcript is drawn: text, tool calls, and subagent runs.
   (prompt disclosure)
 - `web/src/components/ToolGroup.tsx` — forwards `renderNested` to `ToolCallCard`
 - `web/src/components/ActivityRow.tsx` — renders the same `agentMeta`/`MAIN_AGENT_META` glyph the
-  settled card will use (dimmed, no spinner; the phase label shimmers via `.lines-shimmer-text`)
+  settled card will use (dimmed, no spinner; the phase label shimmers via `.lines-shimmer-text`). In step mode it is the in-progress checklist row's markup, so the two swap without moving the text.
 
+- `web/src/lib/turnSteps.ts` — `turnSteps` (steps and passthrough entries for one turn), `taskCarries`
+  (open tasks each turn starts with), `narrationLabel`, `TurnStep`, `TurnPassthrough`, `TurnEntry`,
+  `TaskState`; pure, runtime-importing only `groupSummary`/`toolSummary` plus types
+- `web/src/components/TurnChecklist.tsx` — `TurnChecklist` and its `StepRow` (expand state, status
+  icon, tally and diff totals); passthrough items draw through `Transcript`'s `Item`
+- `web/src/components/Reveal.tsx`, `web/src/components/CrossfadeLine.tsx`,
+  `web/src/components/ShimmerText.tsx` — the motion primitives: grow-in, text crossfade, clock-synced shimmer
+- `web/src/lib/useChangeKey.ts` — a counter that moves only on a real change after mount
+- `web/src/lib/activityHandoff.ts` — what the activity row shows, so the checklist row replacing it can start on the same text and glyph
+- `web/src/lib/transcript.ts` (`foldAgentTurns`) — a lone tool group folds into a card; trailing
+  streaming text splits out beside the card, as the finished answer does
+- `server/src/sessions.ts` — `TASK_LIST_PROMPT` (task list and Bash `description` section) and
+  `CLAUDE_CODE_ENABLE_TODO_TOOLS` in `buildQueryOptions`
 ## Symbols
 
 - `Markdown` — shared renderer, used by both the user bubble and unwrapped agent text
@@ -159,6 +172,12 @@ How everything in the transcript is drawn: text, tool calls, and subagent runs.
   `task_started`/`task_notification` state), not from `parseTaskInput`'s own
   `input.run_in_background === true` alone — that input field is absent from every real
   backgrounded call observed in practice, so the flag would never render without this
+
+- `turnSteps` — a folded turn's items as checklist entries; when the turn keeps a task list, its rows are the tasks
+- `taskCarries` — the open tasks each folded turn starts with, keyed by turn; an unchanged carry is the same array
+- `TurnChecklist` — the checklist body of a Compact-level turn card
+- `Reveal`, `CrossfadeLine`, `ShimmerText`, `useChangeKey` — the checklist's motion primitives
+- `recordActivity`, `clearActivity`, `activityOnScreen` — the activity-row hand-off
 
 ## Data flow
 
@@ -304,6 +323,39 @@ letting them through made the row flip between concurrent background agents and 
 (correctly labeled) background card. Full detail, plus the server-side tracking and the
 composer/sidebar/alert surfaces, live in [background-tasks](background-tasks.md).
 
+### Turn checklist (Compact level)
+
+A folded `agent-turn` card renders its body as a checklist when it has at least one step
+(`web/src/lib/turnSteps.ts`, `TurnChecklist.tsx`). A turn with only passthrough items keeps the
+flat list. Steps come from one of two sources:
+
+- **The agent's task list.** When a turn calls `TaskCreate`/`TaskUpdate`, each task is one row,
+  labelled by its subject (its active form while in progress). Tool calls made while a task is in
+  progress sit under its row; the task-tool calls themselves get no row. Work before the first task
+  and after the last shows as inferred steps above and below the list. Tasks still open when a turn
+  starts carry in from earlier turns (`taskCarries`). The task list is requested per session: the
+  CLI's task tools are enabled (`CLAUDE_CODE_ENABLE_TODO_TOOLS`) and a system-prompt section asks for
+  one on multi-step work (both in `sessions.ts`). Whether the agent follows it is up to the model.
+- **Inferred steps**, otherwise. Narrated text opens a step, labelled by its first sentence with
+  markdown and lead-ins ("Let me", "Now") stripped, falling back to the tool label under three words.
+  Thinking-only items join the next call's step. An unnarrated tool group splits into one step per
+  run of the same tool. A subagent spawn is labelled by its description, a call carrying
+  `input.description` by that, file tools by file name, and other tools by a phrase or tool name plus
+  input.
+
+Status: `failed` when any tool in the step has `isError`; `active` on the last step while the turn is
+live and its card is the transcript's tail (text streaming below the card settles it to done);
+`pending` for a listed task not yet started; otherwise `done`. Each row's tally and `+N −N` totals
+come from `groupSummary` and `groupDiffTotals`, and the turn's cost and duration move to the last row.
+
+Passthrough items (a pending permission, a failed, stopped or recovering result, an interjection, live
+streaming text) render between rows and never inside a step. A successful result gets no entry. A
+step's open state is sticky per session in a module-scope map, and steps start closed.
+
+Motion is per change, never per mount: a live turn's first rows take over the activity row's slot
+(`activityHandoff`), status icons and labels crossfade (`CrossfadeLine`), and new rows grow in
+(`Reveal`). A reload or scroll back plays nothing. Reduced motion turns it all off.
+
 ### Noise reduction
 
 Three read-side reinterpretations — no server change, no change to what is emitted or
@@ -315,7 +367,7 @@ tracks the last init's model in a local variable and only pushes a `system-init`
 when the model differs from the previous one (the first init always pushes, since the
 tracker starts unset). A later push — a genuine same-provider model switch mid-session
 (`setModel`, opus → sonnet) — carries `changed: true` so `Transcript.tsx` renders
-`model set to …` instead of `session started · …`. A cross-provider switch is unrelated:
+`model set to …`; a first init is no longer rendered at all, so the `session started · <model>` line is gone. A cross-provider switch is unrelated:
 that already has its own `ProviderSwitchItem`/`ProviderSwitchMarker`. Side effect: since
 `system-init` is a `foldAgentTurns` boundary, dropping the per-turn repeats also drops a
 per-turn fold boundary — normal turns are unaffected (`user` is already a boundary and
@@ -324,7 +376,7 @@ into the turn around it, which is the intended reading.
 
 **Result row becomes a chip, not a row.** A successful (`!isError && !stopped &&
 !recovering`) `result` item renders nothing when it is a child of an `agent-turn` card
-(Compact level) — the turn header already carries its cost/duration as chips, via
+(Compact level) — the turn's cost and duration are carried by the card (header chips, or the last checklist row when a checklist shows), via
 `turnToolStats(turn.items).result` and the shared `formatSpendUsd`/`formatDuration`
 (`web/src/lib/format.ts`). At top level (a text-only turn, or Full/Grouped level, where
 nothing folds) it renders a small right-aligned dimmed meta line (`$0.42 · 29s`) instead
@@ -416,6 +468,12 @@ they belong to the card and not to the compaction.
   filter (broadcast but absent from `store.loadTranscript`, with the `compact_result` exemption and
   `task_started`/`task_notification` still landing on disk); see
   [background-tasks](background-tasks.md) for the rest of that file's coverage.
+
+- `server/src/turnSteps.test.ts` — step grouping (narration plus tools, silent tool runs, spawn and
+  description labels, file-tool phrases), status rules including the live tail, passthrough items
+  not swallowed, stable keys under appends, task-list rows and carries, a successful result getting no
+  entry, and `foldAgentTurns` keeping a lone tool group and trailing streaming text.
+- `server/src/sessions.spawn.test.ts` — every turn enables the CLI task tools and appends the task-list section.
 
 ## Business rules
 
@@ -558,6 +616,17 @@ they belong to the card and not to the compaction.
   revision of a version stays reachable from the card.
 - Focus keeps every version's frame mounted and stacked, so switching versions never reloads a page or
   changes the card's height.
+
+- A pending permission and a failed or stopped result never hide inside a step: they render between the rows,
+  and a failed result keeps its Retry action.
+- A step's open or closed state is sticky per session, so rebuilds, remounts and session switches don't reset it;
+  every step starts closed, including the live one.
+- A checklist turn has no header line: its cost and duration sit on the last row, and the AI turn summary (when
+  summaries are on) shows above the rows once the turn ends.
+- The activity row ("Thinking…") is hidden once a checklist shows, except while a plan or UI mock is being written,
+  since no step names those yet.
+- A task list is a presentation source only: no event is added, and old transcripts holding task calls reflow on
+  reload.
 
 ## Architectural rules
 
@@ -747,6 +816,11 @@ they belong to the card and not to the compaction.
 
 - Proposal frames reuse the file preview's sandboxed shell (`/html-preview.html`). Nothing in the
   shell's CSP or sandbox differs for transcript mocks.
+
+- `turnSteps.ts` must stay importable by the server's node runner: no imports that pull in JSX. `isAgentTool`'s
+  spawn-name check and the description fallback are therefore copied there rather than imported from `agents.ts`.
+- The checklist reads only transcript items. The server's contribution is one env flag and one system-prompt section
+  in `sessions.ts`; nothing new is persisted or emitted.
 
 ## Related decisions
 

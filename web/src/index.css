@@ -377,6 +377,167 @@
   outline-offset: -2px;
 }
 
+/* Turn checklist (Compact level): one row per step of a folded turn. The
+   activity row ("Thinking…") uses the same slot and metrics in step mode, so the
+   row that replaces it changes only its icon and text. */
+.tx-step-slot {
+  position: relative;
+  display: inline-flex;
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+}
+
+/* Layered, so a crossfade has both icons in the slot at once (see IconSlot). */
+.tx-step-icon {
+  position: absolute;
+  inset: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+}
+
+.tx-step-icon-agent {
+  color: var(--mantine-color-dimmed);
+}
+
+.tx-step-icon-done {
+  border: 1px solid var(--mantine-color-dimmed);
+  color: var(--mantine-color-dimmed);
+}
+
+.tx-step-icon-active {
+  border: 1.5px solid var(--mantine-color-dimmed);
+}
+
+.tx-step-icon-pending {
+  border: 1px dashed var(--mantine-color-dimmed);
+}
+
+.tx-step-icon-failed {
+  background: var(--mantine-color-red-filled);
+  color: var(--mantine-color-white);
+}
+
+/* Checklist motion. Nothing that is replaced ever disappears before its
+   successor is visible — that empty frame is what reads as flicker:
+   - a changed icon crossfades: the old one fades out on top of the new one;
+   - changed text crossfades the same way (CrossfadeLine), and the shimmer is
+     clock-synced, so its sweep runs on through the swap;
+   - only something new animates in, and it grows (height and opacity
+     together), so what's below slides down instead of jumping. The
+     transcript's follow-the-stream scroll already follows resize bursts. */
+.tx-icon-in {
+  animation: tx-icon-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+@keyframes tx-icon-in {
+  from {
+    opacity: 0;
+    transform: scale(0.6);
+  }
+}
+
+.tx-icon-out {
+  animation: tx-icon-out 240ms ease-out forwards;
+}
+
+@keyframes tx-icon-out {
+  to {
+    opacity: 0;
+    transform: scale(1.25);
+  }
+}
+
+/* CrossfadeLine: both layers share one grid cell, so the line keeps its size
+   and position while the old text fades out over the new. Each layer truncates
+   on its own; the 2px drift makes the change read as a swap, not a blink. */
+.tx-xfade {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+}
+
+.tx-xfade-layer {
+  grid-area: 1 / 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.tx-text-in {
+  animation: tx-text-in 240ms 60ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+@keyframes tx-text-in {
+  from {
+    opacity: 0;
+    transform: translateY(2px);
+  }
+}
+
+/* Leaves faster than the new text arrives (which waits 60ms): two different
+   strings both legible at once read as a double image, not a crossfade. */
+.tx-text-out {
+  animation: tx-text-out 160ms ease-in forwards;
+  pointer-events: none;
+}
+
+@keyframes tx-text-out {
+  to {
+    opacity: 0;
+    transform: translateY(-2px);
+  }
+}
+
+/* Reveal: a one-row grid whose track animates from 0fr. The inner box clips
+   only vertically (overflow-y: clip leaves x visible), so a row's hover pill
+   still bleeds into the gutter; the class comes off when the animation ends. */
+.tx-reveal {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: 1fr;
+  animation: tx-reveal 260ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.tx-reveal > .tx-reveal-inner {
+  min-width: 0;
+  min-height: 0;
+  overflow-y: clip;
+}
+
+@keyframes tx-reveal {
+  from {
+    grid-template-rows: 0fr;
+    opacity: 0;
+  }
+}
+
+/* Text that appears where there was none (a row's first spend figure). */
+.tx-fade {
+  animation: tx-fade 200ms ease-out;
+}
+
+@keyframes tx-fade {
+  from {
+    opacity: 0;
+  }
+}
+
+/* A step's tool cards: flush with the row above, no rule or indent. The
+   vertical gap alone groups them under their step. */
+.tx-step-detail {
+  margin: 4px 0 8px;
+}
+
+/* The cards' 13px chevrons centred under the 16px step icons (8px): their rows
+   get 1.5px more start padding. Only the step's own cards, not nested ones. */
+.tx-step-detail > * > .tx-row {
+  padding-left: 7.5px;
+}
+
 /* A subagent run is a container, not a row: a layout-free inset accent plus a faint
    tint marks the whole card — header and nested transcript — as one unit.
    inset box-shadow, not border-inline-start: a real border would shift the chevron
@@ -638,6 +799,26 @@
     animation: none;
     color: inherit;
     background: none;
+  }
+  .tx-icon-in,
+  .tx-text-in,
+  .tx-fade {
+    animation: none;
+  }
+  .tx-text-out {
+    display: none;
+  }
+  /* No animation, so no animationend: hide the outgoing icon and text outright,
+     and make a reveal inert (Reveal only drops its class when the animation ends). */
+  .tx-icon-out {
+    display: none;
+  }
+  .tx-reveal {
+    display: block;
+    animation: none;
+  }
+  .tx-reveal > .tx-reveal-inner {
+    overflow: visible;
   }
   .agent-rotator-word.is-active .agent-rotator-letter {
     animation: none;

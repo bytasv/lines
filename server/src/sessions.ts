@@ -288,6 +288,19 @@ export function promptTextOf(message: Record<string, unknown>): string {
  * none). Absent only when discovery found nothing at all — in which case
  * `pushTurn` has already refused the turn.
  */
+/**
+ * Asks the agent to keep a task list on multi-step work. The web's Compact
+ * transcript renders those tasks as the turn's checklist (web/src/lib/turnSteps.ts);
+ * without them it can only infer steps from the tool calls.
+ */
+const TASK_LIST_PROMPT = `## Task list
+
+When a request needs three or more distinct steps, call TaskCreate for each step before starting, with a short imperative subject (e.g. "Add retry to the upload client") and an activeForm (e.g. "Adding retry to the upload client"). Mark each task in_progress with TaskUpdate when you start it and completed as soon as it is done; keep exactly one in_progress at a time. The user watches this list as the progress of the turn. Skip it for single-step requests and plain questions.
+
+## Bash descriptions
+
+Always set \`description\` on every Bash call: 5-10 words on what the command does (e.g. "Count component files per package"). The transcript shows it as the step's label.`;
+
 function claudeExecutableOption(): Record<string, unknown> {
   const cli = claudeCliStatus();
   return cli.path ? { pathToClaudeCodeExecutable: cli.path } : {};
@@ -2076,6 +2089,7 @@ export class SessionManager {
     const settings = this.store.loadSettings();
     const appendParts: string[] = [];
     if (settings?.compressResponses !== false) appendParts.push(COMPRESS_RESPONSES_PROMPT);
+    appendParts.push(TASK_LIST_PROMPT);
 
     // Same "read fresh, cache nothing" rule as the toggle above, for the same
     // reason: the plan-mode effort is a global setting, not session state.
@@ -2099,6 +2113,9 @@ export class SessionManager {
     const codeMode = settings?.claudeCodeMode === true && claudeCliSupportsCodeMode(claudeCliStatus());
     const envOverrides: Record<string, string> = {
       ...(accessToken ? { CLAUDE_CODE_OAUTH_TOKEN: accessToken } : {}),
+      // The CLI hides its task tools (TaskCreate/TaskUpdate/…) from newer models
+      // unless asked; the web transcript renders a turn's tasks as its checklist.
+      CLAUDE_CODE_ENABLE_TODO_TOOLS: '1',
       ...(codeMode ? { CLAUDE_CODE_EXPERIMENTAL_CODE_MODE: '1' } : {}),
     };
 

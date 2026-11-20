@@ -68,6 +68,9 @@ that silently never arrived (below).
    [transcript-rendering](transcript-rendering.md)) gives an unchanged rebuilt item back its
    previous object identity, which is what lets the row-level `memo`s and the `toolDiffCache`
    WeakMap actually skip work across a rebuild instead of recomputing everything from scratch.
+The Compact checklist (see [transcript-rendering](transcript-rendering.md)) follows the same rule:
+`turnSteps` is memoized on the turn's `items`, which `reconcileItems` keeps stable, and `taskCarries`
+hands back the same array for an unchanged carry, so a rebuild that didn't touch a turn doesn't re-render its rows.
 
 ### Loading a transcript, and why it used to look dead
 

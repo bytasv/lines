@@ -167,7 +167,8 @@ test('compression turned off sends neither the ruleset nor a plugin', async () =
   await settle();
 
   const options = h.pushes[0]!.options;
-  assert.equal((options.systemPrompt as { append?: string }).append, undefined);
+  // The task-list prompt is always appended; only the ruleset is toggled.
+  assert.ok(!(options.systemPrompt as { append?: string }).append?.includes(COMPRESS_RESPONSES_PROMPT));
   // Nothing is cloned or loaded from disk any more, so the key must be gone
   // rather than empty.
   assert.ok(!('plugins' in options));
@@ -182,9 +183,20 @@ test('a compression toggle reaches the next turn without touching the session', 
   h.sessions.prompt('s1', 'again');
   await settle();
 
-  assert.equal((h.pushes[0]!.options.systemPrompt as { append?: string }).append, undefined);
+  assert.ok(!(h.pushes[0]!.options.systemPrompt as { append?: string }).append?.includes(COMPRESS_RESPONSES_PROMPT));
   const second = h.pushes[1]!.options.systemPrompt as { append?: string };
   assert.ok(second.append?.includes(COMPRESS_RESPONSES_PROMPT));
+});
+
+test('every turn enables the CLI task tools and asks for a task list', async () => {
+  const h = harness(async () => 'tok', {}, { compressResponses: false });
+
+  h.sessions.prompt('s1', 'hello');
+  await settle();
+
+  const options = h.pushes[0]!.options;
+  assert.equal((options.env as Record<string, string>).CLAUDE_CODE_ENABLE_TODO_TOOLS, '1');
+  assert.match((options.systemPrompt as { append?: string }).append ?? '', /TaskCreate/);
 });
 
 test('a refresh failure fails the turn with the reason', async () => {

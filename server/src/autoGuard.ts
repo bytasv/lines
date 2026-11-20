@@ -1087,7 +1087,11 @@ const MCP_READ_TOOL_PATTERN = /read|list|get|search|view/i;
  * Tools that only observe state (or track the agent's own todo list). Nothing
  * here mutates the repo, the network, or the machine.
  */
-const READ_ONLY_TOOLS = new Set(['Read', 'Glob', 'Grep', 'NotebookRead', 'TodoWrite', 'TaskOutput']);
+const READ_ONLY_TOOLS = new Set([
+  'Read', 'Glob', 'Grep', 'NotebookRead', 'TodoWrite', 'TaskOutput',
+  // The agent's own task list (enabled by CLAUDE_CODE_ENABLE_TODO_TOOLS in sessions.ts).
+  'TaskCreate', 'TaskUpdate', 'TaskGet', 'TaskList',
+]);
 
 /**
  * True when a call is a plain observation of project state. Used outside auto
