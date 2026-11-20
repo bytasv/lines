@@ -334,6 +334,16 @@
   ],
   "desktop": [
     {
+      "version": "0.2.69",
+      "date": "2026-11-20",
+      "items": [
+        {
+          "text": "Workflow steps now keep what you typed apart from the step's instructions, so the chat can show just your words.",
+          "image": "desktop-next-step-prompt.png"
+        }
+      ]
+    },
+    {
       "version": "0.2.68",
       "date": "2026-11-20",
       "items": [
@@ -526,10 +536,5 @@
       ]
     }
   ],
-  "desktopPending": [
-    {
-      "text": "Workflow steps now keep what you typed apart from the step's instructions, so the chat can show just your words.",
-      "image": "desktop-next-step-prompt.png"
-    }
-  ]
+  "desktopPending": []
 }
