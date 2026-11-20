@@ -43,6 +43,7 @@ import type {
   SessionErrorKind,
   SessionMeta,
   SessionStatus,
+  StepPromptInfo,
   TokenUsageBreakdown,
   TranscriptEvent,
   UserUiSettings,
@@ -4035,9 +4036,10 @@ export class SessionManager {
       attachments?: Attachment[];
       mentions?: PromptMention[];
       actor?: Actor;
+      step?: StepPromptInfo;
     },
   ) {
-    const { text, source, actor } = turn;
+    const { text, source, actor, step } = turn;
     const mentions = turn.mentions ?? [];
     this.emitEvent(meta.id, 'user', {
       text,
@@ -4046,6 +4048,9 @@ export class SessionManager {
       ...(mentions.length ? { mentions } : {}),
       // Persisted in the append-only JSONL, so attribution survives a restart.
       ...(actor ? { actor } : {}),
+      // A workflow step's opening prompt: lets the transcript show only what the
+      // user typed. Display-only; the model still gets the full `text`.
+      ...(step ? { step } : {}),
     });
     // One field on the synced blob, so the sidebar can say who is running the
     // turn. Cleared when nobody in particular sent it, rather than left stale.
@@ -4087,6 +4092,8 @@ export class SessionManager {
     /** Who sent it. Absent for the owner and for internal callers (workflows,
      *  recovery), which read as the session's host on the way out. */
     actor?: Actor,
+    /** Set by a workflow step's opening prompt (see {@link StepPromptInfo}). */
+    step?: StepPromptInfo,
   ) {
     const meta = this.sessions.get(sessionId);
     if (!meta) throw new Error(`unknown session ${sessionId}`);
@@ -4105,7 +4112,7 @@ export class SessionManager {
     // and the SDK content blocks are built from the raw attachments at push time.
     const stored = this.stageAttachments(sessionId, attachments);
 
-    this.openTurn(meta, { text, source, attachments: stored, mentions, actor });
+    this.openTurn(meta, { text, source, attachments: stored, mentions, actor, step });
 
     const content = this.promptContent(text, attachments);
     this.pushTurnSafely(

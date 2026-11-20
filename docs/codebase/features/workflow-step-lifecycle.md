@@ -68,6 +68,7 @@ reads as "done" without opening the session.
 - `web/src/components/Transcript.tsx` (`WorkflowMarker`)
 - `web/src/components/Composer.tsx`
 - `web/src/components/WorkflowStepper.tsx`
+- `web/src/components/StepPromptHeader.tsx` (step pill and collapsed prompt preview on a step's opening bubble)
 - `web/src/components/workflow/WorkflowRunModal.tsx` (per-step model/effort picker, launch and mid-run)
 - `web/src/lib/useStepResolver.ts` (shared step/workflow lookup)
 - `web/src/components/ConfirmModal.tsx` (reused, not modified)
@@ -83,6 +84,7 @@ reads as "done" without opening the session.
 - `SessionManager.interrupting` (in-flight interrupt set)
 - `SessionManager.handleWorkerEnded` (ended-without-result fallback)
 - `SessionManager.TurnCompleteListener` (`interrupted` third argument)
+- `StepPromptInfo` (`shared/types.ts`; the `step` field on a step's opening `user` event: index, name, model, the user's own words, and the hand-off and goal offsets into the prompt text)
 - `WorkflowEngine.reopenParkedStep` (parked step back to `running`)
 - `SessionManager.setTurnResumedListener` / `TurnResumedListener`
 - `WorkflowEngine.snapshotOf` (frozen copy of a library row taken at attach)
@@ -469,6 +471,26 @@ the goal's when-met choice, unmet iterates the same step, and a cap, judge failu
 failed turn parks the step with the goal paused or stopped. Forced and plan-approval advances
 still win, and advance, approve, force-advance and rewind all drop the live goal.
 
+### Step prompt in the transcript
+
+A step's opening prompt is one `user` event. `runStep` attaches a `StepPromptInfo` to it, so the
+transcript can show the user's own words and fold the rest away. `text` on the event stays the
+full prompt that was sent; the model receives all of it. The offsets index into that text and
+mark where the auto-prepended hand-off ends and where the goal suffix starts. A missing offset
+means that section is absent.
+
+The bubble (`UserBubble`) renders a header row first: the step pill, then a `Prompt` toggle.
+Expanding it shows the full prompt in tagged sections (context, step, goal) with a line count
+and a copy button. The body shows only the user's words. A step started with nothing typed
+(Approve or auto-advance) has no user words, so it renders as an outlined bubble holding just the
+header. That bubble has no Edit action, because there is no text to put back in the composer;
+Delete from here stays. Copy copies the user's words, or the full text if there are none.
+
+A `started` workflow marker still reaches the item list, but it renders as an invisible anchor
+(the stepper's scroll target and progress-bar source), not a divider. Events written before
+`StepPromptInfo` existed, and mid-step `'workflow'` prompts such as crash-resume or plan
+re-prompts, have no `step` and render as plain bubbles.
+
 ## Dependencies
 
 `@tabler/icons-react` `IconCircleCheckFilled` for the sidebar finished icon (already an
@@ -690,6 +712,10 @@ installed icon, no new package). No other new dependencies.
   marker already exists in that transcript's own viewport it unpins the transcript from
   follow-the-stream and scrolls straight to it, otherwise it drops the tail window and scrolls
   once the marker mounts.
+
+- A step's opening bubble shows only the user's own words. For a retry, that is the raw feedback.
+  On the workflow's first step, it is the task, and only when the template uses `{task}` and the
+  task is non-blank. Later steps never show the task. The full prompt stays one click away.
 
 ### Per-run model and effort overrides
 

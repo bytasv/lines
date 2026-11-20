@@ -1619,6 +1619,26 @@ export interface PendingSteer {
   afterTurn?: boolean;
 }
 
+/**
+ * Rides a workflow step's opening 'user' event (`data.step`), so the transcript
+ * can show only what the user typed and fold the step's instructions away.
+ * `text` on the event stays the full prompt sent; the offsets index into it.
+ * Absent on events written before this existed and on mid-step 'workflow'
+ * prompts (crash-resume, plan re-prompts) — those render as plain bubbles.
+ */
+export interface StepPromptInfo {
+  index: number;
+  name: string;
+  /** Effective model id, for the pill label. */
+  model?: string;
+  /** The words the user actually typed: the task on the entry step, or retry feedback. */
+  userText?: string;
+  /** Char offset in `text` where the auto-prepended hand-off ends. */
+  contextEnd?: number;
+  /** Char offset in `text` where the goal suffix starts. */
+  goalStart?: number;
+}
+
 export interface InterjectData {
   text: string;
   /** Display-only @mention badges; the expansion is already baked into `text`. */

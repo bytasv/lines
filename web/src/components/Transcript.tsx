@@ -73,6 +73,8 @@ import {
   type TranscriptItem,
 } from '../lib/transcript';
 import { REVEAL_STEP_EVENT } from '../lib/workflowReveal';
+import { StepPromptHeader } from './StepPromptHeader';
+import { modelLabel } from './workflow/StepSettings';
 import { requestRest } from '../lib/transcriptBackfill';
 import { TranscriptAnchorContext, type KeepInView } from '../lib/transcriptAnchor';
 import { useAttachmentUrl } from '../lib/files';
@@ -96,20 +98,29 @@ import { taskCarries, turnSteps, type TaskState } from '../lib/turnSteps';
  * this has no branch for `approved` / `retried` / `interrupted` / a clean park.
  */
 function WorkflowMarker({ data }: { data: WorkflowMarkerData }) {
+  // No visible divider for a step start: the step's opening bubble already names
+  // the step (StepPromptHeader). Kept as an invisible anchor for the stepper's
+  // click-to-scroll and progress bar. It sits right above that bubble, and the
+  // negative margin cancels the Stack gap a zero-height row would otherwise add.
+  if (data.event === 'started') {
+    return (
+      <Box
+        data-workflow-step={data.stepIndex}
+        aria-hidden
+        style={{ height: 0, marginBottom: 'calc(-1 * var(--stack-gap, 0px))' }}
+      />
+    );
+  }
   const label =
-    data.event === 'started'
-      ? `Step ${data.stepIndex + 1}: ${data.stepName}`
-      : data.event === 'waiting-approval'
-        ? data.missingOutputs?.length
-          ? `${data.stepName} — not run: nothing published for ${data.missingOutputs
-              .map((n) => `{outputs.${n}}`)
-              .join(', ')}`
-          : `${data.stepName} — failed, retry or approve to skip`
-        : 'Workflow complete';
+    data.event === 'waiting-approval'
+      ? data.missingOutputs?.length
+        ? `${data.stepName} — not run: nothing published for ${data.missingOutputs
+            .map((n) => `{outputs.${n}}`)
+            .join(', ')}`
+        : `${data.stepName} — failed, retry or approve to skip`
+      : 'Workflow complete';
   return (
     <Divider
-      // Anchor for the stepper's click-to-scroll; first 'started' marker is the step's start.
-      {...(data.event === 'started' ? { 'data-workflow-step': data.stepIndex } : {})}
       label={
         <Group gap={6}>
           <IconRoute size={12} />
@@ -119,6 +130,42 @@ function WorkflowMarker({ data }: { data: WorkflowMarkerData }) {
       labelPosition="center"
       color={data.event === 'workflow-done' ? 'teal' : 'gray'}
     />
+  );
+}
+
+/**
+ * A mid-session model change, e.g. "Sonnet 5.5 → Opus 5.5". Deliberately quieter
+ * than the other dividers: two short hairlines that fade toward the edges, no
+ * icon or chip. The builder places it above the prompt that first ran on the
+ * new model.
+ */
+function ModelChangeMarker({ from, to }: { from?: string; to: string }) {
+  // Primitives, so an unrelated store change does not re-render the row.
+  const fromLabel = useStore((s) => (from ? modelLabel(s.models, from) : null));
+  const toLabel = useStore((s) => modelLabel(s.models, to));
+  const hairline = (fadeFrom: 'left' | 'right') => (
+    <Box
+      h={1}
+      style={{
+        width: 96,
+        minWidth: 16,
+        flexShrink: 1,
+        opacity: 0.7,
+        background: `linear-gradient(to ${fadeFrom === 'left' ? 'right' : 'left'}, transparent, var(--mantine-color-default-border))`,
+      }}
+    />
+  );
+  return (
+    <Group gap={10} justify="center" wrap="nowrap">
+      {hairline('left')}
+      <Text fz={11} c="dimmed" style={{ whiteSpace: 'nowrap' }}>
+        {fromLabel && <>{fromLabel} → </>}
+        <Text span inherit c="var(--mantine-color-text)" opacity={0.8}>
+          {toLabel}
+        </Text>
+      </Text>
+      {hairline('right')}
+    </Group>
   );
 }
 
@@ -464,6 +511,12 @@ function UserBubble({
     return meta ? agentLabel(meta) : 'the agent';
   });
   const seq = Number(item.key.slice(1));
+  // A workflow step's opening prompt shows only what the user typed; the step's
+  // instructions fold into the header. Older events carry no `step` and render as before.
+  const step = item.step;
+  const shownText = step ? step.userText : item.text;
+  /** Approve or auto-advance with nothing typed: outlined, so it reads as automated. */
+  const stepOnly = !!step && !step.userText;
 
   const openConfirm = (intent: RewindIntent) => {
     // Read at click time, not subscribed: the transcript changes on every event
@@ -554,7 +607,8 @@ function UserBubble({
           radius="md"
           px="sm"
           py={6}
-          bg="var(--mantine-color-default-hover)"
+          bg={stepOnly ? 'transparent' : 'var(--mantine-color-default-hover)'}
+          withBorder={stepOnly}
           // maxWidth: 80% resolves against the full-width row above, so the
           // bubble caps at 80% of the transcript column and hugs its text below
           // that. minWidth: 0 is load-bearing twice — it stops a wide code block
@@ -576,9 +630,14 @@ function UserBubble({
               Goal
             </Badge>
           )}
-          {item.text && <UserText text={item.text} />}
+          {step && (
+            <Box mb={shownText ? 4 : 0}>
+              <StepPromptHeader step={step} text={item.text} />
+            </Box>
+          )}
+          {shownText && <UserText text={shownText} />}
           {item.mentions && item.mentions.length > 0 && (
-            <Group gap={6} mt={item.text ? 6 : 0}>
+            <Group gap={6} mt={shownText ? 6 : 0}>
               {item.mentions.map((m) => {
                 const meta = mentionKindMeta[m.kind];
                 const Icon = meta?.icon;
@@ -597,7 +656,7 @@ function UserBubble({
             </Group>
           )}
           {item.attachments && item.attachments.length > 0 && (
-            <Group gap="xs" mt={item.text ? 6 : 0}>
+            <Group gap="xs" mt={shownText ? 6 : 0}>
               {item.attachments.map((att) => (
                 <AttachmentTile key={att.url} att={att} onImage={onImage} />
               ))}
@@ -629,19 +688,21 @@ function UserBubble({
             color="gray"
             aria-label="Copy message"
             // Never gated: reading your own text back is not a session action.
-            onClick={() => clipboard.copy(item.text)}
+            onClick={() => clipboard.copy(shownText ?? item.text)}
           >
             {clipboard.copied ? <IconCheck size={14} /> : <IconCopy size={14} />}
           </ActionIcon>
         </Tooltip>
         {canRewind && (
           <>
-            {action(
-              'edit',
-              IconPencil,
-              'Edit',
-              'Edit and resend — deletes this message and everything after it, and puts its text back in the composer',
-            )}
+            {/* Nothing typed to put back in the composer on a step-only bubble. */}
+            {!stepOnly &&
+              action(
+                'edit',
+                IconPencil,
+                'Edit',
+                'Edit and resend — deletes this message and everything after it, and puts its text back in the composer',
+              )}
             {action(
               'rewind',
               IconArrowBackUp,
@@ -901,9 +962,10 @@ const Item = memo(function Item({
     case 'system-init':
       // A later init only reaches here when the model actually moved, and "session
       // started" would be a lie about it.
+      if (item.changed) return <ModelChangeMarker from={item.from} to={item.model} />;
       return (
         <Text size="xs" c="dimmed" ta="center">
-          {item.changed ? `model set to ${item.model}` : `session started · ${item.model}`}
+          session started · {item.model}
         </Text>
       );
     case 'result': {

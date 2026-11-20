@@ -1,6 +1,20 @@
 {
   "web": [
     {
+      "version": "0.1.46",
+      "date": "2026-11-20",
+      "items": [
+        {
+          "text": "A workflow step's message in the chat now shows only what you typed, with the step's instructions folded behind a Prompt toggle you can open or copy.",
+          "image": "web-0.1.46-step-prompt.png"
+        },
+        {
+          "text": "When a session moves to another model, the chat shows a quiet \"Sonnet 5.5 → Opus 5.5\" line above the first message the new model answers.",
+          "image": "web-0.1.46-model-change.png"
+        }
+      ]
+    },
+    {
       "version": "0.1.45",
       "date": "2026-11-20",
       "items": [
@@ -512,5 +526,10 @@
       ]
     }
   ],
-  "desktopPending": []
+  "desktopPending": [
+    {
+      "text": "Workflow steps now keep what you typed apart from the step's instructions, so the chat can show just your words.",
+      "image": "desktop-next-step-prompt.png"
+    }
+  ]
 }

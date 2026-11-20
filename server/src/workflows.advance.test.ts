@@ -4,7 +4,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import type {
+  InlineStep,
   SessionMeta,
+  StepPromptInfo,
   ServerMessage,
   TranscriptEvent,
   WorkflowDef,
@@ -1147,4 +1149,114 @@ test('attach with overrides seeds the session from step 0’s effective values',
   h.workflows.attach('s1', 'wf1');
   assert.equal(h.s1().model, 'claude-sonnet-5-5');
   assert.equal(h.s1().workflow!.stepOverrides, undefined);
+});
+
+/**
+ * A two-step workflow over a throwaway store, collecting transcript events, for
+ * the `step` metadata the opening 'user' event of each step carries.
+ */
+function stepPromptHarness(
+  steps: Partial<InlineStep>[],
+  workflow: Partial<WorkflowState> = {},
+) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lines-step-prompt-'));
+  const wf: WorkflowDef = {
+    id: 'wf1',
+    name: 'step prompt flow',
+    steps: steps.map((s, n) => ({
+      name: `Step ${n + 1}`,
+      promptTemplate: `do step ${n + 1}{feedback}`,
+      model: 'claude-sonnet-5-5',
+      permissionMode: 'default' as const,
+      autoAdvance: false,
+      freshStart: false,
+      ...s,
+    })),
+  };
+  const state: WorkflowState = {
+    workflowId: 'wf1',
+    started: true,
+    stepIndex: 0,
+    stepStatuses: steps.map((_, n) => (n === 0 ? 'waiting-approval' : 'pending')),
+    ...workflow,
+  };
+  fs.writeFileSync(path.join(root, 'sessions.json'), JSON.stringify([meta(state)]));
+  fs.writeFileSync(path.join(root, 'workflows.json'), JSON.stringify([wf]));
+  const events: TranscriptEvent[] = [];
+  const broadcast = (msg: ServerMessage) => {
+    if (msg.type === 'event') events.push(msg.event);
+  };
+  const store = createStore(root);
+  const sessions = new SessionManager(store, new GuardAllowlist(store), broadcast);
+  sessions.attachWorker({
+    push: () => {},
+    interrupt: () => {},
+    close: () => {},
+    setModel: () => {},
+    setPermissionMode: () => {},
+    rpcResult: () => {},
+  } as never);
+  sessions.consolidateStepOutput = async () => 'PLAN TEXT';
+  const workflows = new WorkflowEngine(store, sessions, broadcast, 'u1');
+  const lastUser = () => {
+    const e = events.filter((x) => x.kind === 'user').at(-1);
+    assert.ok(e, 'a user event was emitted');
+    return e.data as { text: string; step?: StepPromptInfo };
+  };
+  return { sessions, workflows, events, lastUser };
+}
+
+test('the entry step carries the typed task as its step userText', async () => {
+  const h = stepPromptHarness([{ name: 'Plan', promptTemplate: 'Plan this: {task}{feedback}' }, {}], {
+    started: false,
+    stepStatuses: ['pending', 'pending'],
+  });
+  assert.equal(h.workflows.startIfPending('s1', 'add dark mode'), true);
+  await settle();
+  const data = h.lastUser();
+  assert.match(data.text, /^Plan this: add dark mode/);
+  assert.equal(data.step?.index, 0);
+  assert.equal(data.step?.name, 'Plan');
+  assert.equal(data.step?.model, 'claude-sonnet-5-5');
+  assert.equal(data.step?.userText, 'add dark mode');
+});
+
+test('an advanced step carries step metadata but no userText, even when it substitutes {task}', async () => {
+  const h = stepPromptHarness([{}, { name: 'Build', promptTemplate: 'Build {task}{feedback}' }], {
+    task: 'add dark mode',
+  });
+  h.workflows.approve('s1', 0);
+  await settle();
+  const data = h.lastUser();
+  assert.equal(data.step?.index, 1);
+  assert.equal(data.step?.name, 'Build');
+  assert.equal(data.step?.userText, undefined);
+  assert.equal(data.step?.contextEnd, undefined);
+  assert.equal(data.step?.goalStart, undefined);
+});
+
+test('a retry carries the raw feedback as its step userText', async () => {
+  const h = stepPromptHarness([{}, {}]);
+  h.workflows.retry('s1', 0, 'make it shorter');
+  await settle();
+  const data = h.lastUser();
+  assert.equal(data.step?.index, 0);
+  assert.equal(data.step?.userText, 'make it shorter');
+  assert.match(data.text, /asked for changes: make it shorter/);
+});
+
+test('a hand-off prefix and a goal suffix are tagged by offsets into the prompt', async () => {
+  const h = stepPromptHarness([{}, { name: 'Review', promptTemplate: 'Review it.{feedback}', freshStart: true }], {
+    stepOverrides: [null, { goal: { condition: 'tests pass', maxTurns: 3, onMet: 'wait' } }],
+  });
+  h.workflows.approve('s1', 0);
+  await settle();
+  const { text, step } = h.lastUser();
+  assert.ok(step?.contextEnd !== undefined, 'contextEnd recorded');
+  assert.ok(step?.goalStart !== undefined, 'goalStart recorded');
+  const context = text.slice(0, step.contextEnd);
+  assert.ok(context.startsWith('## Context from the previous step'));
+  assert.match(context, /PLAN TEXT/);
+  assert.equal(text.slice(step.contextEnd, step.goalStart), 'Review it.');
+  assert.match(text.slice(step.goalStart), /This step has a goal\. Keep working until it holds: tests pass/);
 });

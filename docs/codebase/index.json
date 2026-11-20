@@ -753,7 +753,7 @@
       "id": "workflow-step-lifecycle",
       "name": "Workflow step lifecycle",
       "doc": "features/workflow-step-lifecycle.md",
-      "purpose": "How a running workflow step's turn settles into advance, park, or stall; the manual escape hatches for a stuck or stalled step; the bounded consolidation of a step's output before it is handed on; and the sidebar checkmark for a fully-finished workflow.",
+      "purpose": "How a running workflow step's turn settles into advance, park, or stall; the manual escape hatches for a stuck or stalled step; the bounded consolidation of a step's output before it is handed on; and the sidebar checkmark for a fully-finished workflow, and how a step's opening prompt shows in the transcript (the user's own words, with the full prompt behind a toggle).",
       "covers": [
         "workflow-step-advance",
         "workflow-stop-parks",
@@ -761,7 +761,8 @@
         "workflow-stalled-step-start",
         "workflow-approve-loader",
         "workflow-step-output-consolidation",
-        "workflow-done-session-indicator"
+        "workflow-done-session-indicator",
+        "workflow-step-prompt-display"
       ],
       "entryPoints": [
         "web/src/components/Composer.tsx",
@@ -779,6 +780,7 @@
         "server/src/sessions.ts",
         "server/src/workflows.ts",
         "web/src/components/Transcript.tsx",
+        "web/src/components/StepPromptHeader.tsx",
         "web/src/components/Composer.tsx",
         "server/src/index.ts",
         "web/src/components/WorkflowStepper.tsx",
@@ -845,7 +847,8 @@
         "SessionManager.settleStoppedTurn",
         "WorkflowState.iteratedStep",
         "pendingStepUpdates",
-        "WorkflowEngine.updatePendingSteps"
+        "WorkflowEngine.updatePendingSteps",
+        "StepPromptInfo"
       ],
       "tests": [
         "server/src/workflows.advance.test.ts",
@@ -1405,6 +1408,7 @@
       ],
       "files": [
         "web/src/components/Transcript.tsx",
+        "web/src/components/StepPromptHeader.tsx",
         "web/src/components/Markdown.tsx",
         "web/src/components/ToolGroup.tsx",
         "web/src/components/ToolCallCard.tsx",

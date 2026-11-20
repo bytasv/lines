@@ -55,6 +55,9 @@ How everything in the transcript is drawn: text, tool calls, and subagent runs.
   agent text (`case 'assistant'`, streaming) renders the same component with no wrapping `Paper`;
   `isRedundant` (drops a resolved `AskUserQuestion` permission item once its tool card carries the
   same information); `Item`'s `renderNested` closure passed to `ToolGroup`
+- `web/src/components/StepPromptHeader.tsx` — header row of a workflow step's opening bubble: the
+  step pill, and a collapsed `Prompt` preview of the full prompt the step sent (see
+  [workflow-step-lifecycle](workflow-step-lifecycle.md#step-prompt-in-the-transcript))
 - `web/src/components/Markdown.tsx` — shared renderer (`remarkGfm`, `rehypeColorSwatches`,
   `rehypeFilePaths`, `rehypeHighlight`); its `img` component renders `MarkdownImage`, and both
   link branches wrap their children in `MarkdownLinkContent`
@@ -367,7 +370,7 @@ tracks the last init's model in a local variable and only pushes a `system-init`
 when the model differs from the previous one (the first init always pushes, since the
 tracker starts unset). A later push — a genuine same-provider model switch mid-session
 (`setModel`, opus → sonnet) — carries `changed: true` so `Transcript.tsx` renders
-`model set to …`; a first init is no longer rendered at all, so the `session started · <model>` line is gone. A cross-provider switch is unrelated:
+a model-change divider (`from → to`); a first init is no longer rendered at all, so the `session started · <model>` line is gone. A cross-provider switch is unrelated:
 that already has its own `ProviderSwitchItem`/`ProviderSwitchMarker`. Side effect: since
 `system-init` is a `foldAgentTurns` boundary, dropping the per-turn repeats also drops a
 per-turn fold boundary — normal turns are unaffected (`user` is already a boundary and
@@ -394,7 +397,9 @@ a failure park (`waiting-approval` with `failed === true` or a non-empty
 `missingOutputs`), and `workflow-done`. Plain `waiting-approval`, `approved`,
 `retried`, and `interrupted` are filtered out — the `WorkflowStepper` above the
 transcript and the approve card already carry that state live, and a step used to cost
-up to three divider rows. Filtered post-`buildTranscript`, not rendered as `null` and
+up to three divider rows. A step's `started` marker still reaches the item list, but it
+renders as an invisible scroll anchor rather than a divider: the step's opening bubble
+names the step. Filtered post-`buildTranscript`, not rendered as `null` and
 not suppressed at emission: the tail-window budget and the "Show earlier messages (N)"
 count stay honest, and the group/text/plan resets a `'workflow'` event performs during
 the build (see the `case 'workflow'` reset block) are unaffected. `WorkflowMarker`'s
@@ -597,14 +602,17 @@ they belong to the card and not to the compaction.
 - A `system`/`init` row only renders when the model actually differs from the previous
   init the transcript saw — not once per turn (the CLI restarts every turn). The first
   init in a transcript always renders (`session started · model`); a later one only
-  renders on a genuine model change and reads `model set to model` instead. A
-  cross-provider switch is a separate marker (`ProviderSwitchItem`) and is unaffected.
+  renders on a genuine model change, as a quiet divider `from → to` (`ModelChangeMarker`).
+  That divider sits above the prompt that first ran on the new model, because the switch
+  happens before that prompt is sent. A cross-provider switch is a separate marker
+  (`ProviderSwitchItem`) and is unaffected.
 - A successful turn's cost and duration render as chips on the turn's header (Compact
   level) rather than as their own centered row; a turn with no header card (text-only,
   or Full/Grouped level) shows them as a small right-aligned dimmed line instead. A
   failed, stopped, or recovering turn keeps its centered row, error text, and Retry
   affordance unchanged — only the success case moved.
-- Only three workflow-marker events render in the transcript: `started`, a failure park
+- Only three workflow-marker events render in the transcript: `started` (as an invisible
+  anchor, not a divider), a failure park
   (`waiting-approval` with `failed` or `missingOutputs`), and `workflow-done`. A clean
   park, an approve, a retry, and an interrupt leave no transcript trace — the stepper and
   the approve card already show that state live. A park marker that does render always

@@ -19,6 +19,7 @@ import type {
   GoalState,
   StepGoal,
   StepGoalSpec,
+  StepPromptInfo,
 } from '@lines/shared';
 import {
   isSessionActive,
@@ -1602,11 +1603,17 @@ export class WorkflowEngine {
       return;
     }
 
+    // Offsets into the final prompt, recorded where each piece is concatenated so
+    // the transcript can tag the hand-off and goal sections apart from the step's own.
+    let contextEnd: number | undefined;
+    let goalStart: number | undefined;
     if (handoff) {
       // A template pulling {outputs.*} (or {previous} directly) already carries its
       // context — auto-prepending would inject the same text twice.
       if (!usesTokens && previous) {
-        prompt = `## Context from the previous step\n\n${previous}\n\n---\n\n${prompt}`;
+        const context = `## Context from the previous step\n\n${previous}\n\n---\n\n`;
+        prompt = context + prompt;
+        contextEnd = context.length;
       }
       this.sessions.resetClaudeSession(sessionId);
     } else if (freshStart && entry) {
@@ -1618,11 +1625,30 @@ export class WorkflowEngine {
     // with rides its first prompt.
     const goal = meta.workflow.stepGoal;
     if (entry && goal?.stepIndex === i && goalDrivesTurns(goal)) {
+      goalStart = prompt.length;
       prompt += `\n\nThis step has a goal. Keep working until it holds: ${goal.condition}`;
     }
 
+    // What the user typed, shown as the bubble's body: retry feedback (raw, not the
+    // framed feedbackText), else the task on the workflow's first step when its
+    // template actually carries it. Later steps never re-show the task.
+    const task = meta.workflow.task?.trim();
+    const userText = feedback
+      ? feedback
+      : entry && i === 0 && task && content.promptTemplate.includes('{task}')
+        ? meta.workflow.task
+        : undefined;
+    const stepInfo: StepPromptInfo = {
+      index: i,
+      name: content.name,
+      model: effective.model,
+      ...(userText ? { userText } : {}),
+      ...(contextEnd !== undefined ? { contextEnd } : {}),
+      ...(goalStart !== undefined ? { goalStart } : {}),
+    };
+
     if (feedback !== undefined) this.sessions.markRetry(sessionId);
-    this.sessions.prompt(sessionId, prompt, 'workflow', attachments, [], actor);
+    this.sessions.prompt(sessionId, prompt, 'workflow', attachments, [], actor, stepInfo);
   }
 
   /**

@@ -8,6 +8,7 @@ import type {
   PlanChatEventData,
   PromptMention,
   ProviderSwitchData,
+  StepPromptInfo,
   TranscriptEvent,
   TurnSource,
   TurnSummaryData,
@@ -131,6 +132,9 @@ export type TranscriptItem =
       /** Who sent it. Absent on every row written before sharing existed, and on
        *  the owner's own prompts — both read as the session's host. */
       actor?: Actor;
+      /** Set on a workflow step's opening prompt: the bubble shows only
+       *  `step.userText` and folds the step's instructions away. */
+      step?: StepPromptInfo;
       /** ms epoch, for the hover detail on an authored bubble. */
       ts: number;
     }
@@ -150,8 +154,9 @@ export type TranscriptItem =
   | { kind: 'streaming'; key: string; text: string }
   /** Only pushed when the model differs from the previous init (see buildTranscript):
    *  the CLI restarts per turn, so an undeduped row would repeat every turn.
-   *  `changed` marks a later one — a mid-session model switch, not a session start. */
-  | { kind: 'system-init'; key: string; model: string; changed?: boolean }
+   *  `changed` marks a later one — a mid-session model switch, not a session start —
+   *  and `from` is the model it switched away from. */
+  | { kind: 'system-init'; key: string; model: string; changed?: boolean; from?: string }
   | ResultItem
   | {
       kind: 'permission';
@@ -470,6 +475,7 @@ export function buildTranscript(
           attachments?: Attachment[];
           mentions?: PromptMention[];
           actor?: Actor;
+          step?: StepPromptInfo;
         };
         items.push({
           kind: 'user',
@@ -479,6 +485,7 @@ export function buildTranscript(
           attachments: data.attachments,
           mentions: data.mentions,
           actor: data.actor,
+          ...(data.step ? { step: data.step } : {}),
           ts: event.ts,
         });
         break;
@@ -617,12 +624,18 @@ export function buildTranscript(
               // when the model actually moved (a same-provider setModel — a
               // cross-provider switch has its own marker).
               if (model !== lastInitModel) {
-                items.push({
+                const item: TranscriptItem = {
                   kind: 'system-init',
                   key: `s${event.seq}`,
                   model,
-                  ...(lastInitModel !== null ? { changed: true } : {}),
-                });
+                  ...(lastInitModel !== null ? { changed: true, from: lastInitModel } : {}),
+                };
+                // The init lands after the prompt that started the turn, but the
+                // switch happened before it: a change goes above that prompt, so it
+                // reads as "from here on". Only when the prompt is the last row —
+                // anything after it means this init is not the turn's opener.
+                if (item.changed && items.at(-1)?.kind === 'user') items.splice(items.length - 1, 0, item);
+                else items.push(item);
               }
               lastInitModel = model;
               break;
@@ -1003,7 +1016,7 @@ function reuseItem(old: TranscriptItem, next: TranscriptItem): TranscriptItem {
       return (old as typeof next).text === next.text ? old : next;
     case 'system-init': {
       const o = old as typeof next;
-      return o.model === next.model && o.changed === next.changed ? o : next;
+      return o.model === next.model && o.changed === next.changed && o.from === next.from ? o : next;
     }
     case 'result': {
       const o = old as ResultItem;
