@@ -920,6 +920,11 @@ export interface WorkflowDef {
   ownerName?: string;
   /** Held back from running on this machine until reviewed; see {@link UntrustedMark}. */
   untrusted?: UntrustedMark;
+  /**
+   * Public R2 URLs uploaded through the recipe image pipeline; the first is the
+   * cover shown on the new-session picker. At most {@link WORKFLOW_IMAGE_MAX_COUNT}.
+   */
+  images?: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -977,6 +982,8 @@ export const RECIPE_IMAGE_MAX_COUNT = 4;
 /** Decoded bytes, checked bridge- and storage-side. */
 export const RECIPE_IMAGE_MAX_BYTES = 2 * 1024 * 1024;
 export const RECIPE_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'] as const;
+/** A workflow carries one cover screenshot; same size and type limits as a recipe's. */
+export const WORKFLOW_IMAGE_MAX_COUNT = 1;
 export const RECIPE_TAG_MAX = 6;
 export const RECIPE_TAG_MAX_LEN = 24;
 /** Recipes combinable into one run — also the post-expansion ceiling on a bundle. */
@@ -2647,6 +2654,9 @@ export const MESSAGE_AUTHZ: Record<ClientMessage['type'], MessageAuthz> = {
   // Per-run model/effort for a workflow's pending steps: the same choice as
   // setModel/setReasoningEffort, made ahead of the step starting.
   setWorkflowStepOverrides: { needs: 'session', cap: 'setModel' },
+  // Picking a workflow for a fresh session is the same choice as creating a
+  // workflow session, so it needs `createSessions` as well as the session.
+  setPendingWorkflow: { needs: 'session', cap: 'createSessions' },
   // Taking a pending step's newer library content changes what that step
   // prompts and which permission mode it runs in — more than a model choice —
   // so it rides the cap that already lets a viewer run the workflow's steps
@@ -2940,6 +2950,18 @@ export type ClientMessage =
       type: 'setWorkflowStepOverrides';
       sessionId: string;
       stepOverrides: (WorkflowStepOverride | null)[];
+    }
+  /** The new-session picker: attach a workflow to a session that has not run
+   *  anything yet (swapping any pending one), or `workflowId: null` to go back to
+   *  a bare session. Refused once the session has a turn, a started workflow or
+   *  a live goal. */
+  | {
+      type: 'setPendingWorkflow';
+      sessionId: string;
+      workflowId: string | null;
+      /** A guest's own workflow inline, as on `createSession`. Wins over `workflowId`. */
+      workflowDef?: WorkflowDef;
+      stepOverrides?: (WorkflowStepOverride | null)[];
     }
   /** Take the library's newer content for pending steps of the run's frozen
    *  workflow (see `pendingStepUpdates`). `expected` is the candidate the client

@@ -33,7 +33,7 @@ import {
   IconTrash,
 } from '@tabler/icons-react';
 import type { StepContent, StepDef, UntrustedMark, WorkflowDef } from '@lines/shared';
-import { formatTimestamp, isStepRef } from '@lines/shared';
+import { formatTimestamp, isStepRef, WORKFLOW_IMAGE_MAX_COUNT } from '@lines/shared';
 import { useStore } from '../../store';
 import { getOwnerId } from '../../lib/clerk';
 import { useIsPhone } from '../../lib/layout';
@@ -51,6 +51,7 @@ import { StepOutline } from './StepOutline';
 import { StepBanner } from './StepPane';
 import { isHeld, needsReview, UntrustedBadge, UntrustedReviewModal, workflowReviewItems } from './UntrustedReview';
 import { RecipeLibrary } from '../recipe/RecipeLibrary';
+import { RecipeImages } from '../recipe/RecipeImages';
 import styles from './workflow.module.css';
 
 const cn = (...xs: (string | false | undefined)[]) => xs.filter(Boolean).join(' ');
@@ -247,6 +248,21 @@ function WorkflowOverview({
           {updatesAvailable} pinned step{updatesAvailable === 1 ? ' has' : 's have'} a newer version. Update all
           re-pins without reviewing each change — open a step to see its diff first.
         </StepBanner>
+      )}
+      {(!readOnly || (draft.images?.length ?? 0) > 0) && (
+        <div>
+          <div className={styles.label}>Cover screenshot</div>
+          <Text fz={11} c="dimmed" mb={6}>
+            Shown on this workflow’s card when starting a new session. Without one, the card draws its steps.
+          </Text>
+          <RecipeImages
+            images={draft.images ?? []}
+            readOnly={readOnly}
+            maxCount={WORKFLOW_IMAGE_MAX_COUNT}
+            subject="workflow"
+            onChange={(images) => onPatch({ images })}
+          />
+        </div>
       )}
       <Text size="sm" c="dimmed" maw={560}>
         {n === 0

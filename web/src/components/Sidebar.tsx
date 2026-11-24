@@ -26,7 +26,6 @@ import {
   IconBook,
   IconCircleCheck,
   IconCircleCheckFilled,
-  IconChevronDown,
   IconCoins,
   IconDots,
   IconEye,
@@ -59,13 +58,9 @@ import {
   type DropResult,
 } from '@hello-pangea/dnd';
 import type {
-  PermissionMode,
   ProjectSessionPrefs,
-  ReasoningEffort,
   SessionGroup,
   SessionMeta,
-  WorkflowDef,
-  WorkflowStepOverride,
 } from '@lines/shared';
 import { findWorktree, hasEstimatedSpend, projectPaths, projectRoots, rootsForCwd } from '@lines/shared';
 import type { SessionSort } from '../lib/format';
@@ -79,11 +74,14 @@ import {
 } from '../lib/format';
 import { useCan, useCanOnSession, useSessionMachine } from '../lib/can';
 import { searchSessions } from '../lib/files';
-import { inlineWorkflow, sessionsOnMachine, uncoveredSharedSessions } from '../lib/machines';
+import { sessionsOnMachine, uncoveredSharedSessions } from '../lib/machines';
 import { useIsPhone, useReveal } from '../lib/layout';
 import { MOD, newSessionHotkey } from '../lib/platform';
 import { ConfirmModal } from './ConfirmModal';
 import { SingleRunModal } from './workflow/SingleRunModal';
+import { useLaunchableWorkflows } from '../lib/useLaunchableWorkflows';
+import { useCreateSession, useNewSessionChoice, useSetPendingWorkflow, type CreateSessionOptions } from '../lib/useCreateSession';
+import { isUnstarted } from '../lib/recentWorkflows';
 import { useIdentityResolver } from '../lib/identity';
 import type { SidebarMode, SidebarSearchScope } from '../store';
 import {
@@ -214,9 +212,13 @@ const SessionRow = memo(function SessionRow({
   onSelect,
   groups,
   groupKey,
+  onLeave,
 }: {
   session: SessionMeta;
   selected: boolean;
+  /** Archive, complete or delete was sent for this row: if it is the open
+   *  session, move to the new-session view rather than stay on it. */
+  onLeave?: (sessionId: string) => void;
   /** Phone only: the sidebar is a drawer there, and it covers what was picked. */
   onSelect?: () => void;
   /** The project's sidebar groups, for "Move to group". */
@@ -266,7 +268,10 @@ const SessionRow = memo(function SessionRow({
       return;
     }
     setActionError(null);
-    if (send({ type: 'deleteSession', sessionId: session.id })) setDeleting(true);
+    if (send({ type: 'deleteSession', sessionId: session.id })) {
+      setDeleting(true);
+      onLeave?.(session.id);
+    }
   };
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   // A session with no real prompt yet is safe to delete outright; others archive first.
@@ -567,13 +572,19 @@ const SessionRow = memo(function SessionRow({
                       <>
                         <Menu.Item
                           leftSection={<IconCircleCheck size={16} />}
-                          onClick={() => send({ type: 'completeSession', sessionId: session.id })}
+                          onClick={() => {
+                            send({ type: 'completeSession', sessionId: session.id });
+                            onLeave?.(session.id);
+                          }}
                         >
                           Mark completed
                         </Menu.Item>
                         <Menu.Item
                           leftSection={<IconArchive size={16} />}
-                          onClick={() => send({ type: 'archiveSession', sessionId: session.id })}
+                          onClick={() => {
+                            send({ type: 'archiveSession', sessionId: session.id });
+                            onLeave?.(session.id);
+                          }}
                         >
                           Archive session
                         </Menu.Item>
@@ -645,6 +656,7 @@ const SessionRow = memo(function SessionRow({
                       onClick={(e) => {
                         stop(e);
                         send({ type: 'completeSession', sessionId: session.id });
+                        onLeave?.(session.id);
                       }}
                     >
                       <IconCircleCheck size={13} />
@@ -658,6 +670,7 @@ const SessionRow = memo(function SessionRow({
                       onClick={(e) => {
                         stop(e);
                         send({ type: 'archiveSession', sessionId: session.id });
+                        onLeave?.(session.id);
                       }}
                     >
                       <IconArchive size={13} />
@@ -927,9 +940,11 @@ export function Sidebar({
   const sessions = useStore((s) => s.sessions);
   const sessionMachine = useStore((s) => s.sessionMachine);
   const primaryDeviceId = useStore((s) => s.primaryDeviceId);
-  const workflows = useStore((s) => s.workflows);
-  const sharedWorkflows = useStore((s) => s.sharedWorkflows);
+  const { workflows, ownWorkflows, foreignWorkflows, resolveWorkflow, all } =
+    useLaunchableWorkflows();
   const selectedSessionId = useStore((s) => s.selectedSessionId);
+  const selectSession = useStore((s) => s.selectSession);
+  const requestComposerFocus = useStore((s) => s.requestComposerFocus);
   const canCreate = useCan('createSessions');
   const canManageGroups = useCan('manageSessions');
   const activeProject = useStore((s) => s.activeProject);
@@ -955,42 +970,7 @@ export function Sidebar({
   const setPrefs = (patch: ProjectSessionPrefs) => {
     if (prefsKey) setSessionPrefs(prefsKey, patch);
   };
-  // '' = raw session, otherwise workflow id.
-  const lastChoice = prefs.newSessionChoice;
-  /**
-   * On a shared machine `workflows` is the host's library, and the user's own
-   * comes from their own machine's slice (when one is loaded). A workflow picked
-   * from it runs on the host as an inline snapshot (see `createSession`).
-   */
-  const hostProfile = useStore((s) => (s.access ? s.machines[s.primaryDeviceId ?? '']?.ownerProfile : null));
-  const ownView = useStore((s) =>
-    s.access ? Object.values(s.machines).find((m) => !m.view.access)?.view : undefined,
-  );
-  const hostName = access ? (hostProfile?.name ?? hostProfile?.email ?? 'Host') : null;
-  const ownWorkflows = useMemo(
-    () =>
-      (ownView?.workflows ?? []).filter(
-        (o) => !workflows.some((w) => w.id === o.id) && !sharedWorkflows.some((w) => w.id === o.id),
-      ),
-    [ownView, workflows, sharedWorkflows],
-  );
-  const lastWorkflow = [...workflows, ...sharedWorkflows, ...ownWorkflows].find((w) => w.id === lastChoice);
-  // An id present in both lists is owned — it must not also appear under
-  // "Shared by others", where picking it would read as running someone else's.
-  // On a shared machine "owned" covers the user's own library too.
-  const foreignWorkflows = sharedWorkflows.filter(
-    (s) => !workflows.some((w) => w.id === s.id) && !(ownView?.workflows ?? []).some((w) => w.id === s.id),
-  );
-  /**
-   * One of the user's own workflows made self-contained for the host, or why it
-   * cannot be — null when it is not one of theirs. Refused when their own machine
-   * holds any of it back: the host has no way to tell, so it must not travel.
-   */
-  const ownInline = (workflowId: string): ReturnType<typeof inlineWorkflow> | null => {
-    const own = ownWorkflows.find((w) => w.id === workflowId);
-    return own && ownView ? inlineWorkflow(own, ownView.steps, ownView.pinnedSteps, ownView.sharedSteps) : null;
-  };
-  // Persisted like `lastChoice`: running every new session in its own checkout is a
+  // Persisted per project: running every new session in its own checkout is a
   // working habit, not a per-click decision.
   const worktreeMode = prefs.worktree;
   // Defaults to urgency order: the session that needs the user must not sit
@@ -1066,7 +1046,10 @@ export function Sidebar({
     () => uncoveredSharedSessions(machineSessions, projects, projectKeys, access?.scope).sort(compare),
     [access?.scope, projects, machineSessions, projectKeys, compare],
   );
-  const live = projectSessions.filter((s) => !s.archived).sort(compare);
+  // A session shows up once it is started: an empty one the New session button
+  // (or leaving a session) opened stays out of the list until its first prompt.
+  const live = projectSessions.filter((s) => !s.archived && !isUnstarted(s)).sort(compare);
+  const unstarted = projectSessions.filter((s) => !s.archived && isUnstarted(s));
   // A `groupId` naming no group of this project (deleted, or never synced here)
   // reads as ungrouped, so the session falls back into Active.
   const groupIds = new Set(groups.map((g) => g.id));
@@ -1086,11 +1069,9 @@ export function Sidebar({
   // Model/mode come from the settings modal (header gear); compression still
   // inherits from the project's latest session.
   const newSessionDefaults = useStore((s) => s.newSessionDefaults);
-  const markSessionCreatePending = useStore((s) => s.markSessionCreatePending);
   const actionError = useStore((s) => s.actionError);
   const setSidebarActionError = useStore((s) => s.setActionError);
   const worktreePending = useStore((s) => s.worktreePending);
-  const setWorktreePending = useStore((s) => s.setWorktreePending);
   const pendingCreate = useStore((s) => s.pendingCreate);
   const focusComposerFor = useStore((s) => s.focusComposerFor);
   const isPhone = useIsPhone();
@@ -1109,82 +1090,23 @@ export function Sidebar({
     primer.blur();
   }, [pendingCreate, worktreePending, focusComposerFor, actionError]);
   /**
-   * Launch a new session. Anything left out of `opts` comes from the new-session
-   * defaults and the worktree switch. `once` is the Single run window: the launch
-   * is not remembered as the last choice, so the primary button keeps its label.
-   * `reasoningEffort` counts when present as a key, even undefined (= Auto).
+   * Launch a new session (see `useCreateSession`), plus what only the sidebar
+   * does around it: the phone keyboard primer and closing the drawer.
    */
-  const createSession = (
-    workflowId?: string,
-    opts?: {
-      stepOverrides?: (WorkflowStepOverride | null)[];
-      model?: string;
-      reasoningEffort?: ReasoningEffort;
-      permissionMode?: PermissionMode;
-      worktree?: boolean;
-      once?: boolean;
-    },
-  ) => {
-    if (!activeProject) return;
-    const stepOverrides = opts?.stepOverrides;
-    const worktree = opts?.worktree ?? worktreeMode;
-    const reasoningEffort =
-      opts && 'reasoningEffort' in opts ? opts.reasoningEffort : newSessionDefaults.reasoningEffort;
-    // The user's own workflow, on a machine whose library does not have it: it
-    // travels inline, every step resolved here, since the host cannot.
-    const isOwn = !!workflowId && ownWorkflows.some((w) => w.id === workflowId);
-    const inlined = isOwn ? ownInline(workflowId!) : null;
-    if (isOwn && !inlined?.ok) {
-      setSidebarActionError(
-        inlined?.reason === 'unverified'
-          ? 'Your machine has not verified everything this workflow runs. Review it there in Workflows first.'
-          : 'One of this workflow’s shared steps is not available here.',
-      );
-      return;
-    }
-    const workflowDef = inlined?.ok ? inlined.def : null;
+  const createSessionNow = useCreateSession();
+  const createSession = (workflowId?: string, opts?: CreateSessionOptions) => {
     if (isPhone) {
       // A stale error would blur the primer on the spot.
       setSidebarActionError(null);
       keyboardPrimer.current?.focus();
     }
-    // Records the intent that lets the resulting upsert take the selection; the
-    // reducer no longer guesses from `createdAt` (a timestamp from another machine).
-    markSessionCreatePending();
-    // `worktree add` is a multi-second git operation the server awaits before the
-    // session exists, so the button has to stay busy — a second click would cut a
-    // second work tree.
-    if (worktree) {
-      setSidebarActionError(null);
-      setWorktreePending(true);
-    }
-    send({
-      type: 'createSession',
-      name: 'New session',
-      cwd: activeProject,
-      model: opts?.model ?? newSessionDefaults.model,
-      permissionMode: opts?.permissionMode ?? newSessionDefaults.permissionMode,
-      reasoningEffort,
-      workflowId,
-      ...(workflowDef ? { workflowDef } : {}),
-      ...(workflowId && stepOverrides?.some(Boolean) ? { stepOverrides } : {}),
-      // Empty object = let the server name the branch and the path.
-      ...(worktree ? { worktree: {} } : {}),
-    });
-    if (!opts?.once) setPrefs({ newSessionChoice: workflowId ?? '' });
+    if (!createSessionNow(workflowId, opts)) return;
     // On a phone the drawer sits over the composer the user is about to type in.
     onNavigate?.();
   };
 
   /** The Single run window's starting workflow: '' = bare, null = closed. */
   const [singleRunFor, setSingleRunFor] = useState<string | null>(null);
-  /** The def a launch of `workflowId` runs, for picking its per-step models. */
-  const resolveWorkflow = (workflowId: string): WorkflowDef | undefined => {
-    // An own workflow on a shared machine is tuned in its inlined form: its refs
-    // do not resolve against the host's step library.
-    const inlined = ownWorkflows.some((w) => w.id === workflowId) ? ownInline(workflowId) : null;
-    return (inlined?.ok ? inlined.def : null) ?? [...workflows, ...sharedWorkflows].find((w) => w.id === workflowId);
-  };
   /**
    * A new-session click. Cmd/Ctrl+click opens the Single run window instead of
    * launching, bare or not; a plain click launches as before.
@@ -1194,9 +1116,69 @@ export function Sidebar({
       setSingleRunFor(workflowId ?? '');
       return;
     }
-    createSession(workflowId);
+    if (workflowId) createSession(workflowId);
+    else openNewSession();
   };
-  // Mirrors the primary button: a new session with the last choice. Not on a
+  /**
+   * An unstarted session of this project to land on instead of creating one:
+   * hidden from the list, so without this every click would add another
+   * invisible blank. Never one whose loaded transcript turns out not empty.
+   * `worktree` (when given) must match whether the session runs in one.
+   */
+  const reusableSession = (except?: string, worktree?: boolean): SessionMeta | undefined => {
+    const state = useStore.getState();
+    const candidates = unstarted.filter(
+      (s) =>
+        s.id !== except &&
+        !s.readOnly &&
+        !(state.transcriptLoaded[s.id] && (state.transcripts[s.id]?.length ?? 0) > 0) &&
+        !(state.sendingPrompts[s.id]?.length ?? 0) &&
+        !state.queuedPrompts.some((q) => q.sessionId === s.id) &&
+        (worktree === undefined || !!findWorktree(projects, s.cwd) === worktree),
+    );
+    return candidates.find((s) => s.id === state.selectedSessionId) ?? candidates[0];
+  };
+  const reopen = (session: SessionMeta) => {
+    selectSession(session.id);
+    requestComposerFocus(session.id);
+    onNavigate?.();
+  };
+  // The workflow a new session opens with: the last one picked on the
+  // new-session view ('' = bare), as long as it still exists.
+  const [lastChoice] = useNewSessionChoice();
+  const lastWorkflow = lastChoice ? all.find((w) => w.id === lastChoice) : undefined;
+  const setPending = useSetPendingWorkflow();
+  /** The New session button and hotkey: the new-session view, reused or created. */
+  const openNewSession = (opts?: { except?: string; worktree?: boolean }) => {
+    const reuse = reusableSession(opts?.except, opts?.worktree ?? worktreeMode);
+    if (!reuse) {
+      createSession(lastWorkflow?.id, opts?.worktree === undefined ? undefined : { worktree: opts.worktree });
+      return;
+    }
+    // A reused blank carries whatever was picked on it last; bring it in line
+    // with the choice a new session opens with.
+    const want = lastWorkflow?.id ?? null;
+    if ((reuse.workflow?.workflowId ?? null) !== want) setPending(reuse.id, want);
+    reopen(reuse);
+  };
+  /**
+   * Leaving the open session (archive, complete, delete) lands on the
+   * new-session view instead of whatever row happens to be next: an unstarted
+   * session of this project's is reopened when there is one, else a bare one is
+   * created. Through a ref so the memoized rows get one stable callback.
+   */
+  const leaveRef = useRef<(sessionId: string) => void>(() => {});
+  leaveRef.current = (sessionId) => {
+    if (useStore.getState().selectedSessionId !== sessionId) return;
+    if (canCreate && activeProject && !worktreePending) openNewSession({ except: sessionId, worktree: false });
+    else {
+      const reuse = reusableSession(sessionId);
+      if (reuse) reopen(reuse);
+      else selectSession(null);
+    }
+  };
+  const leaveSession = useCallback((sessionId: string) => leaveRef.current(sessionId), []);
+  // Mirrors the primary button: a bare new session. Not on a
   // phone (no keyboard to speak of), and not while a modal or menu owns the keys.
   const hotkey = newSessionHotkey();
   const canHotkeyCreate = !isPhone && canCreate && !!activeProject && !worktreePending;
@@ -1206,7 +1188,7 @@ export function Sidebar({
         hotkey.key,
         () => {
           if (!canHotkeyCreate || overlayOpen()) return;
-          createSession(lastWorkflow?.id);
+          openNewSession();
         },
         { preventDefault: canHotkeyCreate },
       ],
@@ -1215,18 +1197,6 @@ export function Sidebar({
     true,
   );
   const modHint = `${MOD}-click for a single run`;
-
-  // The dropdown spans the whole split button rather than a fixed 240px. Measured
-  // rather than hard-coded: the sidebar is drag-resizable, and `width="target"`
-  // would match the chevron half alone.
-  const [createRow, setCreateRow] = useState<HTMLDivElement | null>(null);
-  const [menuWidth, setMenuWidth] = useState<number | undefined>(undefined);
-  useEffect(() => {
-    if (!createRow) return;
-    const observer = new ResizeObserver(([entry]) => setMenuWidth(entry.contentRect.width));
-    observer.observe(createRow);
-    return () => observer.disconnect();
-  }, [createRow]);
 
   const sidebarMode = useStore(selectSidebarMode);
   const setSidebarMode = useStore((s) => s.setSidebarMode);
@@ -1369,6 +1339,7 @@ export function Sidebar({
               onSelect={onNavigate}
               groups={groups}
               groupKey={groupKey}
+              onLeave={leaveSession}
             />
           </div>
         )}
@@ -1430,6 +1401,7 @@ export function Sidebar({
     if (to.droppableId === ARCHIVED_SECTION) {
       // Archiving keeps the group, so unarchiving later returns it there.
       send({ type: 'archiveSession', sessionId: session.id });
+      leaveSession(session.id);
       return;
     }
     const groupId = to.droppableId.startsWith(GROUP_DROP_PREFIX)
@@ -1625,7 +1597,7 @@ export function Sidebar({
       {/* A guest creates sessions only with an explicit machine-scope grant: a
           session share has no folder to create in, and the bridge refuses it. */}
       {sidebarMode === 'sessions' && !searching && canCreate && (
-        <Box px="sm" pb="xs" ref={setCreateRow}>
+        <Box px="sm" pb="xs">
           {/* The keyboard primer. 16px so iOS does not zoom in on focus; pinned
               in view so focusing it does not scroll anything. */}
           {isPhone && (
@@ -1647,167 +1619,25 @@ export function Sidebar({
               }}
             />
           )}
-          <Button.Group style={{ width: '100%' }}>
-            <Tooltip
-              label={`New session (${hotkey.label}) · ${modHint}`}
-              withArrow
-              fz="xs"
-              openDelay={500}
-              disabled={isPhone}
+          <Tooltip
+            label={`New session (${hotkey.label}) · ${modHint}`}
+            withArrow
+            fz="xs"
+            openDelay={500}
+            disabled={isPhone}
+          >
+            <Button
+              fullWidth
+              // currentColor: the button is disabled while this shows, so the
+              // loader follows the disabled text colour in either scheme.
+              leftSection={worktreePending ? <Loader size={12} color="currentColor" /> : <IconPlus size={14} />}
+              onClick={(e) => createFromClick(e)}
+              disabled={!activeProject || worktreePending}
             >
-              <Button
-                style={{ flex: 1 }}
-                // currentColor: the button is disabled while this shows, so the
-                // loader follows the disabled text colour in either scheme.
-                leftSection={worktreePending ? <Loader size={12} color="currentColor" /> : <IconPlus size={14} />}
-                onClick={(e) => createFromClick(e, lastWorkflow?.id)}
-                disabled={!activeProject || worktreePending}
-              >
-                {lastWorkflow ? lastWorkflow.name : 'New session'}
-                {worktreeMode ? ' in worktree' : ''}
-              </Button>
-            </Tooltip>
-            {/* Always rendered now: the worktree toggle lives here, so the split
-                half can no longer depend on a workflow existing. */}
-            <Menu position="bottom-end" width={menuWidth ?? 240}>
-              <Menu.Target>
-                {/* A hairline in the button's own text colour, so the split reads
-                    as two halves on a flat monochrome fill. */}
-                <Button
-                  px={6}
-                  disabled={!activeProject}
-                  style={{
-                    borderInlineStartWidth: 1,
-                    borderInlineStartColor: 'color-mix(in srgb, currentColor 25%, transparent)',
-                  }}
-                >
-                  <IconChevronDown size={14} />
-                </Button>
-              </Menu.Target>
-              <Menu.Dropdown>
-                {/* A plain Box, not a Menu.Item: that renders its own <button>, and a
-                    Switch inside one is invalid markup whose click lands on either
-                    control depending on the pixel. Outside a Menu.Item it also keeps
-                    the dropdown open, so the toggle can be flipped and then used. */}
-                <Box px="sm" py={6}>
-                  <Switch
-                    size="xs"
-                    // Text left, control hard right, both vertically centred against
-                    // the two-line label — the row reads like a settings line rather
-                    // than a menu entry, which is what it is.
-                    labelPosition="left"
-                    label="Run in a new worktree"
-                    description="Work is committed to a separate branch"
-                    checked={worktreeMode}
-                    onChange={(e) => setPrefs({ worktree: e.currentTarget.checked })}
-                    styles={{
-                      body: {
-                        width: '100%',
-                        alignItems: 'center',
-                        justifyContent: 'space-between',
-                      },
-                      labelWrapper: {
-                        marginInlineEnd: 'var(--mantine-spacing-sm)',
-                      },
-                    }}
-                  />
-                </Box>
-                <Menu.Divider />
-                <Menu.Item
-                  onClick={(e) => createFromClick(e)}
-                  rightSection={
-                    !isPhone && (
-                      <Text size="xs" c="dimmed">
-                        {MOD}-click
-                      </Text>
-                    )
-                  }
-                >
-                  New session
-                </Menu.Item>
-                {workflows.length > 0 && (
-                  <>
-                    <Menu.Divider />
-                    <Menu.Label>
-                      <Group justify="space-between" wrap="nowrap" gap="xs">
-                        <span>With workflow</span>
-                        {!isPhone && (
-                          <Text fz={10} c="dimmed" truncate>
-                            {modHint}
-                          </Text>
-                        )}
-                      </Group>
-                    </Menu.Label>
-                    {workflows.map((w) => (
-                      <Menu.Item
-                        key={w.id}
-                        onClick={(e) => createFromClick(e, w.id)}
-                        // On a shared machine these are the host's, so say whose.
-                        rightSection={
-                          hostName && (
-                            <Text size="xs" c="dimmed" truncate maw={90}>
-                              {hostName}
-                            </Text>
-                          )
-                        }
-                      >
-                        {w.name}
-                      </Menu.Item>
-                    ))}
-                  </>
-                )}
-                {ownWorkflows.length > 0 && (
-                  <>
-                    <Menu.Divider />
-                    <Menu.Label>
-                      <Group justify="space-between" wrap="nowrap" gap="xs">
-                        <span>Yours</span>
-                        {!isPhone && workflows.length === 0 && (
-                          <Text fz={10} c="dimmed" truncate>
-                            {modHint}
-                          </Text>
-                        )}
-                      </Group>
-                    </Menu.Label>
-                    {ownWorkflows.map((w) => (
-                      <Menu.Item key={w.id} onClick={(e) => createFromClick(e, w.id)}>
-                        {w.name}
-                      </Menu.Item>
-                    ))}
-                  </>
-                )}
-                {foreignWorkflows.length > 0 && (
-                  <>
-                    <Menu.Divider />
-                    <Menu.Label>
-                      <Group justify="space-between" wrap="nowrap" gap="xs">
-                        <span>Shared by others</span>
-                        {/* The hint rides the first workflow header only. */}
-                        {!isPhone && workflows.length === 0 && ownWorkflows.length === 0 && (
-                          <Text fz={10} c="dimmed" truncate>
-                            {modHint}
-                          </Text>
-                        )}
-                      </Group>
-                    </Menu.Label>
-                    {foreignWorkflows.map((w) => (
-                      <Menu.Item
-                        key={w.id}
-                        onClick={(e) => createFromClick(e, w.id)}
-                        rightSection={
-                          <Text size="xs" c="dimmed" truncate maw={90}>
-                            {w.ownerName ?? 'Unknown'}
-                          </Text>
-                        }
-                      >
-                        {w.name}
-                      </Menu.Item>
-                    ))}
-                  </>
-                )}
-              </Menu.Dropdown>
-            </Menu>
-          </Button.Group>
+              {lastWorkflow ? lastWorkflow.name : 'New session'}
+              {worktreeMode ? ' in worktree' : ''}
+            </Button>
+          </Tooltip>
           {singleRunFor !== null && (
             <SingleRunModal
               workflows={workflows}
@@ -1817,7 +1647,7 @@ export function Sidebar({
               initialWorkflowId={singleRunFor}
               defaults={newSessionDefaults}
               worktree={worktreeMode}
-              onConfirm={(choice) => createSession(choice.workflowId, { ...choice, once: true })}
+              onConfirm={(choice) => createSession(choice.workflowId, choice)}
               onClose={() => setSingleRunFor(null)}
             />
           )}
@@ -1884,6 +1714,7 @@ export function Sidebar({
                     session={s}
                     selected={s.id === selectedSessionId}
                     onSelect={onNavigate}
+                    onLeave={leaveSession}
                   />
                 ))}
               </>

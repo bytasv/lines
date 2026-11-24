@@ -10,21 +10,25 @@ import {
   Menu,
   Modal,
   Paper,
-  SegmentedControl,
+  Popover,
   Select,
   Stack,
   Text,
+  ThemeIcon,
   Tooltip,
+  UnstyledButton,
+  type MantineTransition,
 } from '@mantine/core';
 import { useHover } from '@mantine/hooks';
 import {
   IconAdjustmentsHorizontal,
+  IconAlertTriangle,
   IconCheck,
   IconChevronDown,
   IconClock,
   IconFile,
+  IconMicrophone,
   IconPaperclip,
-  IconPlayerStop,
   IconSend,
   IconTarget,
   IconUpload,
@@ -68,7 +72,6 @@ import {
 import {
   permissionModeLabel,
   PERMISSION_MODES,
-  PERMISSION_MODE_SEGMENTS,
   SEGMENT_MODES,
 } from '../lib/permissionModes';
 import { buildExpandedPrompt, type MentionValue, uniqueMentions } from '../lib/mentions';
@@ -87,6 +90,7 @@ import { formatElapsed, useVoiceDictation } from '../lib/useVoiceDictation';
 import { DictateButton, VoiceLimitNotice } from './DictateButton';
 import { useIsPhone } from '../lib/layout';
 import { prepareAttachment } from '../lib/imageDownscale';
+import styles from './Composer.module.css';
 
 /**
  * Read a File into a raw-base64 PromptAttachment, downscaling large photos
@@ -210,6 +214,83 @@ function PreviewTile({
   );
 }
 
+/** `248 KB`, from the attachment's raw base64 length. */
+function attachmentSize(att: PromptAttachment): string {
+  const bytes = Math.round((att.data.length * 3) / 4);
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/** Desktop attachment chip: thumbnail, name and size, and a remove ×. */
+function AttachmentChip({
+  att,
+  onOpen,
+  onRemove,
+}: {
+  att: PromptAttachment;
+  onOpen: () => void;
+  onRemove: () => void;
+}) {
+  const isImage = att.mediaType.startsWith('image/');
+  return (
+    <div className={styles.file}>
+      {isImage ? (
+        <UnstyledButton
+          className={styles.fileThumb}
+          aria-label={`Preview ${att.name}`}
+          onClick={onOpen}
+          style={{ cursor: 'zoom-in' }}
+        >
+          <img src={`data:${att.mediaType};base64,${att.data}`} alt={att.name} />
+        </UnstyledButton>
+      ) : (
+        <div className={styles.fileThumb} />
+      )}
+      <div className={styles.fileMeta}>
+        <div className={styles.fileName} title={att.name}>
+          {att.name}
+        </div>
+        <div className={styles.fileSize}>{attachmentSize(att)}</div>
+      </div>
+      <UnstyledButton className={styles.fileRemove} aria-label={`Remove ${att.name}`} onClick={onRemove}>
+        ×
+      </UnstyledButton>
+    </div>
+  );
+}
+
+/**
+ * Keeps an element mounted for `ms` after `show` turns off, so its exit
+ * animation can play: `exiting` is the state to style it leaving.
+ */
+function useExitDelay(show: boolean, ms: number): 'hidden' | 'shown' | 'exiting' {
+  const [state, setState] = useState<'hidden' | 'shown' | 'exiting'>(show ? 'shown' : 'hidden');
+  useEffect(() => {
+    if (show) {
+      setState('shown');
+      return;
+    }
+    setState((s) => (s === 'hidden' ? s : 'exiting'));
+    const timer = setTimeout(() => setState('hidden'), ms);
+    return () => clearTimeout(timer);
+  }, [show, ms]);
+  return state;
+}
+
+/** Menus rise into place from 6px below; popovers from 8px, slightly scaled. */
+const MENU_TRANSITION: MantineTransition = {
+  in: { opacity: 1, transform: 'translateY(0)' },
+  out: { opacity: 0, transform: 'translateY(6px)' },
+  transitionProperty: 'opacity, transform',
+};
+const POPOVER_TRANSITION: MantineTransition = {
+  in: { opacity: 1, transform: 'translateY(0) scale(1)' },
+  out: { opacity: 0, transform: 'translateY(8px) scale(0.96)' },
+  transitionProperty: 'opacity, transform',
+};
+/** A spring's settle (stiffness ~500, damping ~33) as a CSS curve. */
+const SPRING_EASE = 'cubic-bezier(0.22, 1.15, 0.36, 1)';
+
 export function Composer({ session }: { session: SessionMeta }) {
   const isPhone = useIsPhone();
   const [optionsOpen, setOptionsOpen] = useState(false);
@@ -236,17 +317,15 @@ export function Composer({ session }: { session: SessionMeta }) {
       : undefined;
   const shownGoal = workflowRunning ? stepGoal : session.goal;
   const goalDisabledReason = !canPrompt ? 'Your access does not allow prompting this session.' : null;
+  const goalTooltip =
+    goalDisabledReason ??
+    (shownGoal
+      ? 'Edit goal'
+      : workflowRunning
+        ? 'Set a goal for this step — it keeps working until the goal is met'
+        : 'Set a goal — keep going until a condition is met');
   const goalButton = (size: 'lg' | undefined, iconSize: number) => (
-    <Tooltip
-      label={
-        goalDisabledReason ??
-        (shownGoal
-          ? 'Edit goal'
-          : workflowRunning
-            ? 'Set a goal for this step — it keeps working until the goal is met'
-            : 'Set a goal — keep going until a condition is met')
-      }
-    >
+    <Tooltip label={goalTooltip}>
       <span style={{ display: 'inline-flex' }}>
         <ActionIcon
           variant={shownGoal ? 'light' : 'subtle'}
@@ -421,6 +500,8 @@ export function Composer({ session }: { session: SessionMeta }) {
   // the CLI runs a new turn concurrently with a background task.
   const bgTasks = session.backgroundTasks?.length ?? 0;
   const awaitingApproval = session.status === 'waiting-approval';
+  // The desktop card's running ring, kept mounted while it fades out.
+  const runningFx = useExitDelay(session.status === 'running', 400);
 
   /**
    * Why this session's machine cannot take a prompt right now, or null.
@@ -588,16 +669,6 @@ export function Composer({ session }: { session: SessionMeta }) {
   const setPermissionMode = (mode: PermissionMode) =>
     send({ type: 'setPermissionMode', sessionId: session.id, mode });
 
-  const permissionModeControl = (
-    <SegmentedControl
-      size="xs"
-      disabled={!canSetMode || !caps.approvals}
-      data={PERMISSION_MODE_SEGMENTS}
-      value={session.permissionMode}
-      onChange={(v) => setPermissionMode(v as PermissionMode)}
-    />
-  );
-
   // Phone twin of the pills: the same three modes, with the description each
   // pill carries in its tooltip spelled out under the label instead.
   const permissionModeMenu = (
@@ -642,6 +713,42 @@ export function Composer({ session }: { session: SessionMeta }) {
           session.lastRouting.effort ?? 'default'
         } (confidence ${session.lastRouting.confidence.toFixed(2)}). Click to pause.`
       : 'Smart routing is on: each turn may move to another allowed model or effort. Click to pause.';
+  const chooseModel = (v: string | null) => {
+    if (!v || v === session.model) return;
+    // Crossing providers on a session that has run drops its
+    // conversation, so it is confirmed rather than dispatched.
+    if (hasRun && providerForModel(v) !== provider) {
+      setOptionsOpen(false);
+      setSwitchTo(v);
+      return;
+    }
+    send({ type: 'setModel', sessionId: session.id, model: v });
+  };
+  const chooseEffort = (v: string | null) =>
+    v &&
+    send({
+      type: 'setReasoningEffort',
+      sessionId: session.id,
+      effort: v === AUTO_EFFORT ? null : (v as ReasoningEffort),
+    });
+  const routingBadge = routingOn && (
+    // Smart routing's state for this session; a click pauses or resumes it.
+    // A manual model/effort change pauses it on the bridge.
+    <Tooltip label={routingTooltip} withArrow openDelay={300} multiline maw={260}>
+      <Badge
+        size="sm"
+        variant={session.routingPaused ? 'outline' : 'light'}
+        color={session.routingPaused ? 'gray' : 'violet'}
+        style={{ cursor: canSetModel ? 'pointer' : undefined, alignSelf: 'center' }}
+        onClick={() =>
+          canSetModel &&
+          send({ type: 'setRoutingPaused', sessionId: session.id, paused: !session.routingPaused })
+        }
+      >
+        {session.routingPaused ? 'auto off' : 'auto'}
+      </Badge>
+    </Tooltip>
+  );
   const modelControls = (
     <>
       <Select
@@ -668,17 +775,7 @@ export function Composer({ session }: { session: SessionMeta }) {
         })}
         styles={describedOptionStyles}
         value={session.model}
-        onChange={(v) => {
-          if (!v || v === session.model) return;
-          // Crossing providers on a session that has run drops its
-          // conversation, so it is confirmed rather than dispatched.
-          if (hasRun && providerForModel(v) !== provider) {
-            setOptionsOpen(false);
-            setSwitchTo(v);
-            return;
-          }
-          send({ type: 'setModel', sessionId: session.id, model: v });
-        }}
+        onChange={chooseModel}
         allowDeselect={false}
       />
       {/* Disabled rather than hidden on an engine with no effort control, for
@@ -708,36 +805,12 @@ export function Composer({ session }: { session: SessionMeta }) {
             data={effortSelectData(caps.reasoningEfforts, session.reasoningEffort)}
             renderOption={renderOptionWithDescription}
             value={session.reasoningEffort ?? AUTO_EFFORT}
-            onChange={(v) =>
-              v &&
-              send({
-                type: 'setReasoningEffort',
-                sessionId: session.id,
-                effort: v === AUTO_EFFORT ? null : (v as ReasoningEffort),
-              })
-            }
+            onChange={chooseEffort}
             allowDeselect={false}
           />
         </span>
       </Tooltip>
-      {routingOn && (
-        // Smart routing's state for this session; a click pauses or resumes it.
-        // A manual model/effort change pauses it on the bridge.
-        <Tooltip label={routingTooltip} withArrow openDelay={300} multiline maw={260}>
-          <Badge
-            size="sm"
-            variant={session.routingPaused ? 'outline' : 'light'}
-            color={session.routingPaused ? 'gray' : 'violet'}
-            style={{ cursor: canSetModel ? 'pointer' : undefined, alignSelf: 'center' }}
-            onClick={() =>
-              canSetModel &&
-              send({ type: 'setRoutingPaused', sessionId: session.id, paused: !session.routingPaused })
-            }
-          >
-            {session.routingPaused ? 'auto off' : 'auto'}
-          </Badge>
-        </Tooltip>
-      )}
+      {routingBadge}
     </>
   );
   const stopWork = () =>
@@ -747,46 +820,296 @@ export function Composer({ session }: { session: SessionMeta }) {
         : { type: 'stopBackgroundTasks', sessionId: session.id },
     );
 
-  return (
-    // On a phone the composer is a strip across the bottom rather than a card:
-    // no corners, no side or bottom border, no margin. The footer row's
-    // `lines-safe-bottom` still keeps Send above the home indicator.
-    <Paper
-      withBorder
-      radius={isPhone ? 0 : 'lg'}
-      p="xs"
-      pb={isPhone ? 0 : undefined}
-      m={isPhone ? 0 : 'md'}
-      mt={isPhone ? 0 : 4}
-      maw={920}
-      mx={isPhone ? 0 : 'auto'}
-      w="100%"
-      style={{
-        position: 'relative',
-        ...(isPhone && { borderLeft: 'none', borderRight: 'none', borderBottom: 'none' }),
-        borderColor: dragging
-          ? 'var(--mantine-primary-color-filled)'
-          : remote.isRemote
-            ? 'var(--mantine-color-grape-5)'
-            : undefined,
-      }}
-      onDragEnter={(e) => {
-        if (!e.dataTransfer.types.includes('Files')) return;
-        dragDepth.current += 1;
-        setDragging(true);
-      }}
-      onDragOver={(e) => e.preventDefault()}
-      onDragLeave={() => {
-        dragDepth.current = Math.max(0, dragDepth.current - 1);
-        if (dragDepth.current === 0) setDragging(false);
-      }}
-      onDrop={(e) => {
-        e.preventDefault();
-        dragDepth.current = 0;
-        setDragging(false);
-        if (e.dataTransfer.files.length) void addFiles(e.dataTransfer.files);
+  const borderColor = dragging
+    ? 'var(--mantine-primary-color-filled)'
+    : remote.isRemote
+      ? 'var(--mantine-color-grape-5)'
+      : undefined;
+  const dropHandlers = {
+    onDragEnter: (e: React.DragEvent) => {
+      if (!e.dataTransfer.types.includes('Files')) return;
+      dragDepth.current += 1;
+      setDragging(true);
+    },
+    onDragOver: (e: React.DragEvent) => e.preventDefault(),
+    onDragLeave: () => {
+      dragDepth.current = Math.max(0, dragDepth.current - 1);
+      if (dragDepth.current === 0) setDragging(false);
+    },
+    onDrop: (e: React.DragEvent) => {
+      e.preventDefault();
+      dragDepth.current = 0;
+      setDragging(false);
+      if (e.dataTransfer.files.length) void addFiles(e.dataTransfer.files);
+    },
+  };
+
+  // Desktop toolbar pieces.
+  const modelData = modelSelectData(models, session.model, {
+    unavailable: modelUnavailable,
+    warn: modelWarn,
+  });
+  const effortData = effortSelectData(caps.reasoningEfforts, session.reasoningEffort);
+  const effortValue = session.reasoningEffort ?? AUTO_EFFORT;
+  const effortLabel = effortData.find((e) => e.value === effortValue)?.label ?? effortValue;
+  const openUpdates = () => {
+    setModelDropdownOpen(false);
+    setSettingsSection('updates');
+  };
+  const modeSwitch = (
+    <div className={styles.modes} role="radiogroup" aria-label="Permission mode">
+      {SEGMENT_MODES.map((value) => {
+        const mode = PERMISSION_MODES.find((m) => m.value === value)!;
+        const active = session.permissionMode === value;
+        return (
+          <Tooltip key={value} label={mode.description} withArrow disabled={!caps.approvals}>
+            <UnstyledButton
+              className={styles.mode}
+              role="radio"
+              aria-checked={active}
+              data-active={active || undefined}
+              data-mode={value}
+              disabled={!canSetMode || !caps.approvals}
+              onClick={() => !active && setPermissionMode(value)}
+            >
+              {mode.label}
+            </UnstyledButton>
+          </Tooltip>
+        );
+      })}
+    </div>
+  );
+  const modelMenu = (
+    <Menu
+      position="top-start"
+      offset={10}
+      width="max-content"
+      opened={modelDropdownOpen}
+      onChange={setModelDropdownOpen}
+      transitionProps={{ transition: MENU_TRANSITION, duration: 240, timingFunction: SPRING_EASE }}
+      classNames={{
+        dropdown: `${styles.palette} ${styles.menu} ${styles.modelMenu}`,
+        label: styles.menuLabel,
+        item: styles.menuItem,
       }}
     >
+      <Menu.Target>
+        <UnstyledButton className={styles.picker} disabled={!canSetModel} aria-label="Model">
+          {modelLabel(session.model)}
+          <IconChevronDown size={12} />
+        </UnstyledButton>
+      </Menu.Target>
+      <Menu.Dropdown>
+        <Menu.Label>Model</Menu.Label>
+        {modelData.map((item) => (
+          <Menu.Item
+            key={item.value}
+            data-unavailable={item.disabled || undefined}
+            aria-disabled={item.disabled || undefined}
+            closeMenuOnClick={!item.disabled}
+            onClick={() => {
+              // Unavailable rows stay clickable only so their warning can lead
+              // to the pane that fixes it, as the Select's renderer did.
+              if (item.disabled) {
+                if (item.warningActionable) openUpdates();
+                return;
+              }
+              chooseModel(item.value);
+            }}
+          >
+            <div className={styles.menuRow}>
+              <span className={styles.menuItemLabel}>
+                {item.label}
+                {item.warning && (
+                  <Tooltip
+                    label={item.warningActionable ? `${item.warning} — open Updates` : item.warning}
+                    withArrow
+                    multiline
+                    w={240}
+                    position="right"
+                  >
+                    <ThemeIcon size={14} radius="xl" color="orange" variant="filled">
+                      <IconAlertTriangle size={10} />
+                    </ThemeIcon>
+                  </Tooltip>
+                )}
+              </span>
+              {item.description && <span className={styles.menuItemHint}>{item.description}</span>}
+            </div>
+          </Menu.Item>
+        ))}
+      </Menu.Dropdown>
+    </Menu>
+  );
+  const effortMenu = (
+    <Menu
+      position="top-start"
+      offset={10}
+      width={174}
+      transitionProps={{ transition: MENU_TRANSITION, duration: 240, timingFunction: SPRING_EASE }}
+      classNames={{
+        dropdown: `${styles.palette} ${styles.menu}`,
+        label: styles.menuLabel,
+        item: styles.menuItem,
+      }}
+    >
+      <Menu.Target>
+        {/* Disabled rather than hidden on an engine with no effort control, in
+            a span so the tooltip still fires over it. */}
+        <span className={styles.anchor}>
+          <Tooltip
+            label={
+              caps.reasoningEfforts.length
+                ? 'How hard the model thinks. Takes effect on the next turn.'
+                : 'This engine does not expose a reasoning-effort control.'
+            }
+            withArrow
+            openDelay={400}
+          >
+            <UnstyledButton
+              className={styles.picker}
+              disabled={!canSetModel || caps.reasoningEfforts.length === 0}
+              aria-label="Reasoning effort"
+            >
+              {effortLabel} effort
+              <IconChevronDown size={12} />
+            </UnstyledButton>
+          </Tooltip>
+        </span>
+      </Menu.Target>
+      <Menu.Dropdown>
+        <Menu.Label>Effort</Menu.Label>
+        {effortData.map((item) => (
+          <Menu.Item
+            key={item.value}
+            disabled={item.disabled}
+            data-unavailable={item.disabled || undefined}
+            onClick={() => item.value !== effortValue && chooseEffort(item.value)}
+          >
+            <div className={styles.menuRow}>
+              <span className={styles.menuItemLabel}>{item.label}</span>
+            </div>
+          </Menu.Item>
+        ))}
+      </Menu.Dropdown>
+    </Menu>
+  );
+  const onMic = () => {
+    if (dictation.voiceBlock) {
+      if (dictation.voiceBlockActionable) setSettingsSection('voice');
+      else setVoiceError(dictation.voiceBlock);
+      return;
+    }
+    void (voice === 'recording' ? dictation.finish() : dictation.start());
+  };
+  const micLabel = dictation.voiceBlock
+    ? dictation.voiceBlockActionable
+      ? `${dictation.voiceBlock} — open Voice input settings`
+      : dictation.voiceBlock
+    : voice === 'recording'
+      ? 'Finish and transcribe'
+      : voice === 'transcribing'
+        ? 'Transcribing…'
+        : 'Dictate';
+  const dictateControl = (
+    <Popover
+      opened={voice === 'recording'}
+      position="top-end"
+      offset={8}
+      width={330}
+      withArrow
+      arrowSize={13}
+      arrowOffset={10}
+      transitionProps={{ transition: POPOVER_TRANSITION, duration: 260, timingFunction: SPRING_EASE }}
+      classNames={{
+        dropdown: `${styles.palette} ${styles.popover}`,
+        arrow: styles.popoverArrow,
+      }}
+    >
+      <Popover.Target>
+        <div className={styles.anchor}>
+          <Tooltip label={micLabel} withArrow multiline maw={260} disabled={voice === 'recording'}>
+            <UnstyledButton
+              className={styles.iconButton}
+              data-active={voice === 'recording' || undefined}
+              aria-label={dictation.voiceBlock ?? micLabel}
+              aria-disabled={dictation.voiceBlock !== null || undefined}
+              disabled={voice === 'transcribing'}
+              onClick={onMic}
+            >
+              {voice === 'transcribing' ? (
+                <Loader size={14} color="gray" />
+              ) : (
+                <IconMicrophone size={16} opacity={dictation.voiceBlock ? 0.5 : 1} />
+              )}
+            </UnstyledButton>
+          </Tooltip>
+        </div>
+      </Popover.Target>
+      <Popover.Dropdown p={14}>
+        <div className={styles.dictation}>
+          <div className={styles.dictationHeader}>
+            <div className={styles.dictationTitle}>
+              <span className={styles.recordingDot} aria-hidden />
+              <IconMicrophone size={14} />
+              <span>Listening</span>
+            </div>
+            <span className={styles.dictationTimer}>
+              {formatElapsed(dictation.elapsed)} / {formatElapsed(dictation.limitSeconds * 1000)}
+            </span>
+          </div>
+          <div className={styles.waveform}>
+            <div className={styles.waveformTrack}>
+              {voiceLevel && <VoiceWaveform level={voiceLevel} height={32} />}
+            </div>
+          </div>
+          <div className={styles.dictationText}>
+            {/* Near the limit the hint gives way to the countdown and its "+2 min". */}
+            {dictation.remainingMs !== null ? (
+              <VoiceLimitNotice dictation={dictation} keepFocus />
+            ) : (
+              'Insert text transcribes what you say.'
+            )}
+          </div>
+          <div className={styles.actions}>
+            <UnstyledButton
+              className={styles.ghostButton}
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={dictation.cancel}
+            >
+              <IconX size={13} />
+              Cancel
+            </UnstyledButton>
+            <UnstyledButton
+              className={styles.primaryButton}
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => void dictation.finish()}
+            >
+              <IconCheck size={13} />
+              Insert text
+            </UnstyledButton>
+          </div>
+        </div>
+      </Popover.Dropdown>
+    </Popover>
+  );
+  const sendLabel = awaitingApproval
+    ? "Send — keeps iterating on this step (won't advance the workflow)"
+    : bgTasks > 0
+      ? 'Send — the background task keeps running'
+      : 'Send message';
+  const stopLabel = !interruptible
+    ? 'Stop background work'
+    : session.workflow?.started &&
+        session.workflow.stepStatuses[session.workflow.stepIndex] === 'running'
+      ? 'Stop — the step will wait for your review'
+      : 'Interrupt';
+  const showCost =
+    sessionCost.usd != null &&
+    (!caps.contextWindow || (!session.contextSummary && !session.contextUsage));
+
+  const body = (
+    <>
       {dragging && (
         <Stack
           align="center"
@@ -818,7 +1141,32 @@ export function Composer({ session }: { session: SessionMeta }) {
           onClear={() => send({ type: 'clearGoal', sessionId: session.id })}
         />
       )}
-      {(attachments.length > 0 || pendingFiles.length > 0) && (
+      {!isPhone && (attachments.length > 0 || pendingFiles.length > 0) && (
+        <div className={styles.attachments}>
+          {attachments.map((att, i) => (
+            <AttachmentChip
+              key={i}
+              att={att}
+              onOpen={() => setLightbox(`data:${att.mediaType};base64,${att.data}`)}
+              onRemove={() => setAttachments((a) => a.filter((_, j) => j !== i))}
+            />
+          ))}
+          {pendingFiles.map((f) => (
+            <div key={f.id} className={styles.file} aria-label={`Preparing ${f.name}`}>
+              <div className={styles.fileThumb}>
+                <Loader size={14} color="gray" />
+              </div>
+              <div className={styles.fileMeta}>
+                <div className={styles.fileName} title={f.name}>
+                  {f.name}
+                </div>
+                <div className={styles.fileSize}>Preparing…</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      {isPhone && (attachments.length > 0 || pendingFiles.length > 0) && (
         <Group gap="xs" px={6} pb={6}>
           {attachments.map((att, i) => (
             <PreviewTile
@@ -948,9 +1296,10 @@ export function Composer({ session }: { session: SessionMeta }) {
           onFocusChange={setComposerFocused}
           onPasteFiles={(files) => void addFiles(files)}
         />
-        {voice === 'recording' && voiceLevel && (
+        {isPhone && voice === 'recording' && voiceLevel && (
           // ChatGPT-style: while recording, the input *is* the waveform. A Paper
-          // so it takes the composer's own background, whatever the theme.
+          // so it takes the composer's own background, whatever the theme. On a
+          // desktop the mic's own popover carries the recording instead.
           <Paper
             style={{ position: 'absolute', inset: 0, zIndex: 2, display: 'flex', alignItems: 'center' }}
             px={4}
@@ -1025,149 +1374,97 @@ export function Composer({ session }: { session: SessionMeta }) {
           </Group>
         </Group>
       ) : (
-        <>
-          {/* `wrap` rather than `nowrap`: at 390px the model and effort selects do
-          not fit beside the mode pills, and a horizontally clipped row hides the
-          send button. Wrapping costs a line of height on a phone and nothing on
-          a desktop, where the row has always fitted. */}
-          <Group
-            justify="space-between"
-            px={4}
-            pt={4}
-            wrap="wrap"
-            gap={6}
-            className="lines-safe-bottom"
-          >
-            <Group gap="xs" wrap="wrap">
-              <Tooltip label="Attach files">
-                <ActionIcon
-                  variant="subtle"
-                  size="lg"
-                  aria-label="Attach files"
-                  onClick={() => fileInputRef.current?.click()}
+        // `wrap`: a narrow window must not clip the send button off the row.
+        <div className={`${styles.toolbar} lines-safe-bottom`}>
+          <div className={styles.tools}>
+            <Tooltip label="Attach files">
+              <UnstyledButton
+                className={styles.iconButton}
+                aria-label="Attach files"
+                onClick={() => fileInputRef.current?.click()}
+              >
+                <IconPaperclip size={16} />
+              </UnstyledButton>
+            </Tooltip>
+            <Tooltip label={goalTooltip}>
+              <span className={styles.anchor}>
+                <UnstyledButton
+                  className={styles.iconButton}
+                  data-active={shownGoal ? true : undefined}
+                  aria-label="Goal"
+                  disabled={goalDisabledReason !== null}
+                  onClick={() => setGoalOpen(true)}
                 >
-                  <IconPaperclip size={16} />
-                </ActionIcon>
+                  <IconTarget size={16} />
+                </UnstyledButton>
+              </span>
+            </Tooltip>
+            <div className={styles.divider} />
+            {/* Visible but disabled for a codex session, deliberately: its absence
+                would read as a bug, and the tooltip is where the reduced surface
+                gets explained. Only wrapped in that disabled state — each mode
+                carries its own description tooltip otherwise. */}
+            {caps.approvals ? (
+              modeSwitch
+            ) : (
+              <Tooltip
+                label={
+                  'This session runs sandboxed and approves its own tool calls. ' +
+                  'Plan mode is read-only here, and your MCP connections do not apply.'
+                }
+                withArrow
+                openDelay={400}
+              >
+                <span className={styles.anchor}>{modeSwitch}</span>
               </Tooltip>
-              {goalButton('lg', 16)}
-              {/* Visible but disabled for a codex session, deliberately: its absence
-              would read as a bug, and the tooltip is where the reduced surface
-              gets explained. A span so the tooltip fires over a disabled control.
-              Only wrapped in that disabled state — each segment carries its own
-              description tooltip, and a second one on the control fights them. */}
-              {caps.approvals ? (
-                permissionModeControl
-              ) : (
-                <Tooltip
-                  label={
-                    'This session runs sandboxed and approves its own tool calls. ' +
-                    'Plan mode is read-only here, and your MCP connections do not apply.'
-                  }
-                  withArrow
-                  openDelay={400}
-                >
-                  <span style={{ display: 'inline-flex' }}>{permissionModeControl}</span>
-                </Tooltip>
-              )}
-              {modelControls}
-            </Group>
-            <Group gap="xs">
-              <ContextWindowIndicator session={session} />
-              {sessionCost.usd != null && (
-                <Text size="xs" c="dimmed">
-                  {formatSpendUsd(sessionCost.usd, sessionCost.estimated)}
-                </Text>
-              )}
-              {canPrompt && (
-                <DictateButton
-                  dictation={dictation}
-                  iconSize={16}
-                  size="lg"
-                  onBlockedClick={() => setSettingsSection('voice')}
-                />
-              )}
-              {interruptible || bgTasks > 0 ? (
-                <>
-                  {steers && (
-                    <Tooltip label="Queue message — sends after the current turn (⌥↵)">
-                      <ActionIcon
-                        variant="subtle"
-                        size="lg"
-                        aria-label="Queue message"
-                        onClick={() => submit({ queue: true })}
-                        disabled={cannotSend}
-                      >
-                        <IconClock size={16} />
-                      </ActionIcon>
-                    </Tooltip>
-                  )}
-                  <Tooltip
-                    label={
-                      steers
-                        ? 'Send into the current turn — ⌥↵ to queue for after'
-                        : interruptible
-                          ? 'Queue message — sends after the current turn'
-                          : 'Send — the background task keeps running'
-                    }
-                  >
-                    <ActionIcon
-                      variant={interruptible && !steers ? 'subtle' : 'filled'}
-                      size="lg"
-                      aria-label={interruptible && !steers ? 'Queue message' : 'Send message'}
-                      onClick={() => submit()}
-                      disabled={cannotSend}
-                    >
-                      <IconSend size={16} />
-                    </ActionIcon>
-                  </Tooltip>
-                  <Tooltip
-                    label={
-                      !interruptible
-                        ? 'Stop background work'
-                        : session.workflow?.started &&
-                            session.workflow.stepStatuses[session.workflow.stepIndex] === 'running'
-                          ? 'Stop — the step will wait for your review'
-                          : 'Interrupt'
-                    }
-                  >
-                    <ActionIcon
-                      color="gray"
-                      variant="default"
-                      size="lg"
-                      disabled={!canInterrupt}
-                      aria-label="Stop work"
-                      onClick={stopWork}
-                    >
-                      <IconPlayerStop size={16} />
-                    </ActionIcon>
-                  </Tooltip>
-                </>
-              ) : awaitingApproval ? (
-                <Tooltip label="Send — keeps iterating on this step (won't advance the workflow)">
-                  <ActionIcon
-                    variant="filled"
-                    size="lg"
-                    aria-label={interruptible ? 'Queue message' : 'Send message'}
-                    onClick={() => submit()}
-                    disabled={cannotSend}
-                  >
-                    <IconSend size={16} />
-                  </ActionIcon>
-                </Tooltip>
-              ) : (
-                <ActionIcon
-                  variant="filled"
-                  size="lg"
-                  aria-label={interruptible ? 'Queue message' : 'Send message'}
+            )}
+            {modelMenu}
+            {effortMenu}
+            {routingBadge}
+          </div>
+          <div className={styles.tools}>
+            <ContextWindowIndicator session={session} />
+            {showCost && (
+              <span className={styles.cost}>{formatSpendUsd(sessionCost.usd!, sessionCost.estimated)}</span>
+            )}
+            {canPrompt && dictateControl}
+            {/* Running, Send gives way to Stop; it comes back beside Stop once
+                there is something to steer in (or queue, ⌥↵). */}
+            {(!interruptible || !nothingToSend) && (
+              <Tooltip
+                label={
+                  interruptible
+                    ? steers
+                      ? 'Send into the current turn — ⌥↵ to queue for after'
+                      : 'Queue message — sends after the current turn'
+                    : sendLabel
+                }
+              >
+                <UnstyledButton
+                  className={styles.send}
+                  data-ready={!cannotSend || undefined}
+                  aria-label={interruptible && !steers ? 'Queue message' : 'Send message'}
                   onClick={() => submit()}
                   disabled={cannotSend}
                 >
                   <IconSend size={16} />
-                </ActionIcon>
-              )}
-            </Group>
-          </Group>
-        </>
+                </UnstyledButton>
+              </Tooltip>
+            )}
+            {(interruptible || bgTasks > 0) && (
+              <Tooltip label={stopLabel}>
+                <UnstyledButton
+                  className={styles.stop}
+                  disabled={!canInterrupt}
+                  aria-label="Stop work"
+                  onClick={stopWork}
+                >
+                  <span className={styles.stopSquare} />
+                </UnstyledButton>
+              </Tooltip>
+            )}
+          </div>
+        </div>
       )}
       {/* Sized by its content, not by a share of the screen: a sheet pinned at
           80dvh is the same height whether it holds four controls or one, and
@@ -1292,6 +1589,60 @@ export function Composer({ session }: { session: SessionMeta }) {
           />
         )}
       </Modal>
-    </Paper>
+    </>
+  );
+
+  if (isPhone) {
+    return (
+      // On a phone the composer is a strip across the bottom rather than a card:
+      // no corners, no side or bottom border, no margin. The footer row's
+      // `lines-safe-bottom` still keeps Send above the home indicator.
+      <Paper
+        withBorder
+        radius={0}
+        p="xs"
+        pb={0}
+        m={0}
+        maw={920}
+        w="100%"
+        style={{
+          position: 'relative',
+          borderLeft: 'none',
+          borderRight: 'none',
+          borderBottom: 'none',
+          borderColor,
+        }}
+        {...dropHandlers}
+      >
+        {body}
+      </Paper>
+    );
+  }
+
+  return (
+    <div className={`${styles.palette} ${styles.root}`}>
+      <div className={styles.wrap}>
+        {runningFx !== 'hidden' && (
+          <>
+            <div className={styles.halo} data-exiting={runningFx === 'exiting' || undefined} aria-hidden>
+              <div className={`${styles.spinner} ${styles.haloSpinner}`} />
+            </div>
+            <div className={styles.ring} data-exiting={runningFx === 'exiting' || undefined} aria-hidden>
+              <div className={`${styles.spinner} ${styles.ringSpinner}`} />
+            </div>
+          </>
+        )}
+        <div
+          className={styles.card}
+          data-mode={session.permissionMode}
+          data-running={session.status === 'running' || undefined}
+          style={{ borderColor }}
+          {...dropHandlers}
+        >
+          <div className={styles.edge} aria-hidden />
+          {body}
+        </div>
+      </div>
+    </div>
   );
 }

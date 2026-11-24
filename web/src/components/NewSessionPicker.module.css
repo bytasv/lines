@@ -1,0 +1,347 @@
+.scroll {
+  flex: 1;
+  min-height: 0;
+}
+
+/*
+ * The picker and a picked workflow's stepper share one box (SessionView). The
+ * picker always keeps the stepper's slot free at its top, and the stepper lays
+ * over that slot when it appears, so picking a card never moves the cards.
+ */
+.stack {
+  --stepper-slot: 68px;
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.stepperSlot {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 2;
+  background: var(--mantine-color-body);
+  animation: stepperIn 180ms ease-out;
+}
+
+@keyframes stepperIn {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+
+.body {
+  padding-top: calc(var(--stepper-slot, 0px) + 36px);
+}
+
+/* Header: title on the left, the worktree pill on the right. */
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 24px;
+  padding-bottom: 22px;
+  border-bottom: 1px solid var(--mantine-color-default-border);
+}
+
+.titles {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.title {
+  font-size: 22px;
+  line-height: 26px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.worktree {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 34px;
+  padding: 0 8px 0 12px;
+  border-radius: 999px;
+  border: 1px solid var(--mantine-color-default-border);
+  background: var(--mantine-color-default);
+  transition:
+    background 150ms ease,
+    border-color 150ms ease;
+}
+
+.worktree:hover {
+  background: var(--mantine-color-default-hover);
+}
+
+.worktree[data-on] {
+  border-color: var(--mantine-color-dimmed);
+}
+
+.worktreeIcon {
+  color: var(--mantine-color-dimmed);
+  transition: color 150ms ease;
+}
+
+.worktree[data-on] .worktreeIcon {
+  color: var(--mantine-color-text);
+}
+
+.worktreeLabel {
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.sectionLabel {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--mantine-color-dimmed);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.browse {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--mantine-color-dimmed);
+  transition: color 120ms ease;
+}
+
+.browse:hover {
+  color: var(--mantine-color-text);
+  text-decoration: none;
+}
+
+/* Cards */
+.card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  overflow: hidden;
+  border-radius: 16px;
+  border: 1px solid var(--mantine-color-default-border);
+  background: var(--mantine-color-default);
+  transition: background 180ms ease;
+}
+
+.card:hover {
+  background: var(--mantine-color-default-hover);
+}
+
+.card:focus-visible {
+  outline: 2px solid var(--mantine-primary-color-filled);
+  outline-offset: 2px;
+}
+
+/* The selected ring sits over the card, so the card's hover never hides it. */
+.ring {
+  position: absolute;
+  inset: -1px;
+  border-radius: 16px;
+  border: 1.5px solid var(--mantine-primary-color-filled);
+  box-shadow: inset 0 0 0 3px color-mix(in srgb, var(--mantine-primary-color-filled) 8%, transparent);
+  pointer-events: none;
+}
+
+.check {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: var(--mantine-primary-color-filled);
+  color: var(--mantine-primary-color-contrast);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+  animation: checkIn 220ms cubic-bezier(0.3, 1.4, 0.5, 1);
+  pointer-events: none;
+}
+
+@keyframes checkIn {
+  from {
+    opacity: 0;
+    transform: scale(0.6);
+  }
+}
+
+.thumb {
+  aspect-ratio: 16 / 10;
+  overflow: hidden;
+  background: radial-gradient(
+    120% 100% at 0% 0%,
+    var(--mantine-color-default-hover) 0%,
+    var(--mantine-color-body) 65%
+  );
+  border-bottom: 1px solid var(--mantine-color-default-border);
+}
+
+.cover {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 12px 14px;
+  min-width: 0;
+}
+
+/* Chat card: one big speech bubble that drifts by a couple of pixels. */
+.chatThumb {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding-bottom: 6px;
+  background: radial-gradient(
+    120% 100% at 50% 0%,
+    var(--mantine-color-default-hover) 0%,
+    var(--mantine-color-default) 70%
+  );
+}
+
+.bubble {
+  width: 132px;
+  height: 72px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  border-radius: 36px 36px 36px 8px;
+  border: 1px solid var(--mantine-color-default-border);
+  background: var(--mantine-color-default-hover);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.25);
+  animation: float 5s ease-in-out infinite;
+}
+
+.bubbleDot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--mantine-color-text);
+  opacity: 0.9;
+}
+
+.bubbleDot:nth-child(2) {
+  opacity: 0.6;
+}
+
+.bubbleDot:nth-child(3) {
+  opacity: 0.35;
+}
+
+@keyframes float {
+  50% {
+    transform: translateY(-2px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bubble,
+  .check,
+  .stepperSlot {
+    animation: none;
+  }
+}
+
+/* Step flow: numbered dots on one rail, names below, even spacing. */
+.flow {
+  position: relative;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 10px;
+  overflow: hidden;
+}
+
+.flow[data-overflow] {
+  justify-content: flex-start;
+}
+
+.flow[data-overflow]::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 64px;
+  background: linear-gradient(to right, transparent, var(--mantine-color-body) 90%);
+  pointer-events: none;
+}
+
+.chain {
+  display: flex;
+  align-items: flex-start;
+  flex-shrink: 0;
+}
+
+.step {
+  width: 56px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.rail {
+  width: 100%;
+  height: 16px;
+  display: flex;
+  align-items: center;
+}
+
+.railLine {
+  flex: 1;
+  height: 1px;
+  background: var(--mantine-color-default-border);
+}
+
+.railLine[data-off] {
+  background: transparent;
+}
+
+.stepNum {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 9px;
+  font-weight: 600;
+  color: var(--mantine-color-dimmed);
+  border: 1px solid var(--mantine-color-default-border);
+  background: var(--mantine-color-body);
+}
+
+.stepName {
+  width: 54px;
+  font-size: 10px;
+  line-height: 12px;
+  font-weight: 500;
+  text-align: center;
+  color: var(--mantine-color-dimmed);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

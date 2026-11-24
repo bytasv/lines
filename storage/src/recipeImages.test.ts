@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { after, before, test } from 'node:test';
-import { isServedRecipeImage } from './r2.ts';
+import { hasOnlyServedImages, isServedRecipeImage } from './r2.ts';
 
 /**
  * A recipe is one author's content rendered for everyone else, and an image
@@ -48,4 +48,14 @@ test('with no bucket configured, no image URL is one of ours', () => {
   } finally {
     process.env.R2_PUBLIC_BASE_URL = base;
   }
+});
+
+test('a synced workflow blob passes only with no images or only served ones', () => {
+  // PUT /workflows keeps a workflow's cover to the same rule as a recipe's images.
+  assert.equal(hasOnlyServedImages({}), true);
+  assert.equal(hasOnlyServedImages({ images: [] }), true);
+  assert.equal(hasOnlyServedImages({ images: [`${BASE}/recipes/user_a/0f6c.png`] }), true);
+  assert.equal(hasOnlyServedImages({ images: ['https://evil.example/x.png'] }), false);
+  assert.equal(hasOnlyServedImages({ images: [`${BASE}/recipes/user_a/0f6c.png`, '//evil.example/x.png'] }), false);
+  assert.equal(hasOnlyServedImages({ images: 'https://evil.example/x.png' }), false);
 });

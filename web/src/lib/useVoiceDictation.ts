@@ -44,6 +44,8 @@ export interface VoiceDictation {
   /** Milliseconds until the limit stops the recording, inside the warning
    *  window only; null otherwise and when not recording. */
   remainingMs: number | null;
+  /** The live recording's limit, in seconds: where the timer runs to. */
+  limitSeconds: number;
   /** The limit can still be pushed out — it is below the ceiling. */
   canExtend: boolean;
   /** Push the live recording's limit out by one extend. */
@@ -218,6 +220,7 @@ export function useVoiceDictation(sessionId: string, onText: (text: string) => v
     voiceLevel,
     elapsed,
     remainingMs: voice === 'recording' ? voiceLimitWarning(elapsed, limitSeconds) : null,
+    limitSeconds,
     canExtend: limitSeconds < VOICE_MAX_SECONDS,
     extend: () => {
       const recording = recordingRef.current;

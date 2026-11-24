@@ -556,6 +556,9 @@ installed icon, no new package). No other new dependencies.
 
 ## Business rules
 
+- A workflow picked in the new-session picker is attached with `attachPending` before the session
+  starts: it waits with `started: false`, and the first prompt starts it. `detachPending` undoes it
+  only while the session is still fresh (nothing run, empty transcript, no goal driving it).
 - A step with a live step goal is decided by the goal at its settle, not by autoAdvance; Stop
   still parks it.
 - Plain Stop during a running workflow step always parks it at `waiting-approval`; it never

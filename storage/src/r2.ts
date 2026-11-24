@@ -69,6 +69,16 @@ export function isServedRecipeImage(url: unknown): boolean {
   return url.startsWith(`${base}/recipes/`) && !url.includes('..');
 }
 
+/**
+ * Whether a synced blob's `images` (absent, or a list) are all ones this
+ * bucket serves. A row that fails is skipped by its route, never rewritten:
+ * the blob carries its author's signature, and an edited copy would stop
+ * verifying for everyone.
+ */
+export function hasOnlyServedImages(item: { images?: unknown }): boolean {
+  return item.images === undefined || (Array.isArray(item.images) && item.images.every(isServedRecipeImage));
+}
+
 /** Built on first upload, not at boot — an install with no R2 never loads the SDK. */
 let clientPromise: Promise<S3Client> | null = null;
 

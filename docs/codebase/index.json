@@ -848,7 +848,9 @@
         "WorkflowState.iteratedStep",
         "pendingStepUpdates",
         "WorkflowEngine.updatePendingSteps",
-        "StepPromptInfo"
+        "StepPromptInfo",
+        "WorkflowEngine.attachPending",
+        "WorkflowEngine.detachPending"
       ],
       "tests": [
         "server/src/workflows.advance.test.ts",
@@ -859,7 +861,8 @@
         "server/src/workflows.providers.test.ts",
         "server/src/messageAuthz.test.ts",
         "server/src/sessions.ended.test.ts",
-        "server/src/statusMeta.test.ts"
+        "server/src/statusMeta.test.ts",
+        "server/src/workflows.pending.test.ts"
       ],
       "businessRules": [
         "plain Stop during a running workflow step always parks it at waiting-approval; it never advances",
@@ -1231,7 +1234,11 @@
         "web/src/components/SessionGroupSection.tsx",
         "server/src/pushNotifier.ts",
         "web/src/components/InlineSessionName.tsx",
-        "web/src/components/SessionView.tsx"
+        "web/src/components/SessionView.tsx",
+        "web/src/components/NewSessionPicker.tsx",
+        "web/src/lib/recentWorkflows.ts",
+        "web/src/lib/useCreateSession.ts",
+        "web/src/lib/useLaunchableWorkflows.ts"
       ],
       "symbols": [
         "OfflineQueuedMessages",
@@ -1314,7 +1321,11 @@
         "renameSession",
         "manualNamed",
         "InlineSessionName",
-        "SESSION_NAME_MAX"
+        "SESSION_NAME_MAX",
+        "NewSessionPicker",
+        "showsNewSessionView",
+        "recentWorkflows",
+        "replaceOnCreate"
       ],
       "tests": [
         "server/src/statusMeta.test.ts",
@@ -3194,7 +3205,8 @@
         "RecipeEngine.applySyncedRecipes",
         "RecipeEngine.resettleMarks",
         "isServedRecipeImage",
-        "recipeReviewItem"
+        "recipeReviewItem",
+        "hasOnlyServedImages"
       ],
       "tests": [
         "server/src/recipes.version.test.ts",

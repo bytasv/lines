@@ -30,7 +30,7 @@ import {
   revokeGrantsForDevice,
   revokeGrantsForGrantee,
 } from './shares.ts';
-import { isServedRecipeImage, putRecipeImage, r2Configured, r2PublicBaseWarning } from './r2.ts';
+import { hasOnlyServedImages, isServedRecipeImage, putRecipeImage, r2Configured, r2PublicBaseWarning } from './r2.ts';
 import { listSessions, putSession, putSessions, softDeleteSession, toWire } from './sessionRows.ts';
 import { resolveStepVersions } from './stepRows.ts';
 
@@ -322,8 +322,15 @@ app.get('/workflows/shared', async (req, res) => {
  */
 app.put('/workflows', async (req, res) => {
   const userId = userIdOf(req);
-  const list = Array.isArray(req.body) ? (req.body as { id?: string; published?: boolean }[]) : [];
-  const valid = list.filter((wf) => wf?.id);
+  const list = Array.isArray(req.body) ? (req.body as { id?: string; published?: boolean; images?: unknown }[]) : [];
+  const shaped = list.filter((wf) => wf?.id);
+  // A cover image renders on sight for every viewer of a published workflow, so
+  // one pointing anywhere but this deployment's bucket keeps the row out — the
+  // same rule as PUT /recipes, and for the same signature reason not rewritten.
+  const valid = shaped.filter(hasOnlyServedImages);
+  if (valid.length < shaped.length) {
+    console.warn(`[storage] PUT /workflows: skipped ${shaped.length - valid.length} workflow(s) with off-bucket images`);
+  }
   if (valid.length === 0) {
     res.json({ ok: true, count: 0 });
     return;

@@ -1651,6 +1651,31 @@ async function handleMessageImpl(ctx: UserContext, ws: BrowserLink, msg: ClientM
       else if (msg.workflowId) workflows.attach(meta.id, msg.workflowId, msg.stepOverrides);
       break;
     }
+    case 'setPendingWorkflow': {
+      // The new-session picker. Same gates as a workflow at createSession: a
+      // guest's inline workflow is prepared (and may be refused), and synced
+      // content not verified yet throws before the session is touched. The
+      // engine refuses a session that is no longer fresh; a throw reaches the
+      // client as an `error`.
+      if (msg.workflowId === null && !msg.workflowDef) {
+        workflows.detachPending(msg.sessionId);
+        break;
+      }
+      const inline = msg.workflowDef ? prepareInlineWorkflow(ctx, access, msg.workflowDef) : null;
+      if (inline && !inline.ok) {
+        ws.send(
+          JSON.stringify({ type: 'error', sessionId: msg.sessionId, message: inline.reason } satisfies ServerMessage),
+        );
+        break;
+      }
+      if (inline?.ok) {
+        workflows.attachPending(msg.sessionId, { def: inline.def }, msg.stepOverrides);
+      } else if (msg.workflowId) {
+        workflowCommands.assertWorkflowRunnable(ctx, msg.workflowId);
+        workflows.attachPending(msg.sessionId, { workflowId: msg.workflowId }, msg.stepOverrides);
+      }
+      break;
+    }
     case 'deleteSession':
       sessions.deleteSession(msg.sessionId);
       break;

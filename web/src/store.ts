@@ -330,6 +330,13 @@ function isSessionSort(v: unknown): v is SessionSort {
  * something per project. The legacy sidebar mode is the synced `sidebarMode`
  * setting, so it comes from state rather than the snapshot.
  */
+/** See `UiState.replaceOnCreate`. */
+export interface ReplaceOnCreate {
+  sessionId: string;
+  /** The session's own fresh work tree, removed with it. */
+  worktree?: { project: string; path: string };
+}
+
 export function prefsFor(
   state: Pick<UiState, 'sessionPrefs' | 'sidebarMode'>,
   groupKey: string | null,
@@ -1376,7 +1383,13 @@ interface UiState {
    * The user asked for a new session. Read by the `sessionUpsert` reducer, which
    * hands selection to the first session id it has never seen — see `pendingCreate`.
    */
-  markSessionCreatePending: () => void;
+  markSessionCreatePending: (replaces?: ReplaceOnCreate | null) => void;
+  /**
+   * A fresh session the pending create stands in for (the new-session view's
+   * worktree switch re-creates it elsewhere): deleted once the new one claims the
+   * selection, along with its untouched work tree when it had one.
+   */
+  replaceOnCreate: ReplaceOnCreate | null;
   /** Relay control frames — the machine's bridge attached or went away. */
   setMachineOffline: (offline: boolean, deviceId?: string) => void;
   /**
@@ -1415,6 +1428,8 @@ interface UiState {
   takeComposerPrefill: (sessionId: string) => RewindPrompt | null;
   /** Clear `focusComposerFor` once the composer has focused itself. */
   takeComposerFocus: () => void;
+  /** Ask this session's composer to take focus (it clears the request itself). */
+  requestComposerFocus: (sessionId: string) => void;
   /**
    * Register/settle a recipe screenshot upload. The `recipeImageUploaded` reply
    * carries only an uploadId, so the sender records the file name here first;
@@ -1753,6 +1768,7 @@ export const useStore = create<UiState>((set, get) => {
   helloSignature: null,
   seenSessionIds: new Set<string>(),
   pendingCreate: false,
+  replaceOnCreate: null,
   queuedPrompts: [],
   sendingPrompts: {},
   sessions: {},
@@ -1934,15 +1950,22 @@ export const useStore = create<UiState>((set, get) => {
       };
     }),
   setActionError: (message) => set({ actionError: message }),
-  markSessionCreatePending: () => {
+  markSessionCreatePending: (replaces) => {
     if (createIntentTimer) clearTimeout(createIntentTimer);
     // Expires on its own: a create that never lands (the socket dropped, the bridge
     // refused) must not leave an intent behind for an unrelated session to consume.
+    // A replacement waiting on a work tree outlives it: the `projects` re-arm
+    // below restarts the clock once the tree lands.
     createIntentTimer = setTimeout(() => {
       createIntentTimer = null;
-      set({ pendingCreate: false });
+      set((state) => ({
+        pendingCreate: false,
+        replaceOnCreate: state.worktreePending ? state.replaceOnCreate : null,
+      }));
     }, CREATE_INTENT_TTL_MS);
-    set({ pendingCreate: true });
+    // `undefined` re-arms the current intent (see the `projects` handler) and
+    // keeps its replacement; a fresh create says what it replaces, or null.
+    set(replaces === undefined ? { pendingCreate: true } : { pendingCreate: true, replaceOnCreate: replaces });
   },
   // Also clears machineOffline: it describes the machine we are leaving, and a
   // stale "offline" would put the escalated copy up before the new one is tried.
@@ -1963,6 +1986,7 @@ export const useStore = create<UiState>((set, get) => {
       helloSignature: null,
       seenSessionIds: new Set<string>(),
       pendingCreate: false,
+      replaceOnCreate: null,
       focusComposerFor: null,
       // Goes with `pendingCreate` for the same reason: it describes a create in
       // flight on the machine we are leaving, and leaving it set would keep the
@@ -2463,6 +2487,7 @@ export const useStore = create<UiState>((set, get) => {
     return prefill;
   },
   takeComposerFocus: () => set({ focusComposerFor: null }),
+  requestComposerFocus: (sessionId) => set({ focusComposerFor: sessionId }),
 
   setActiveProject: (path) => {
     if (path) localStorage.setItem(ACTIVE_PROJECT_KEY, path);
@@ -2851,6 +2876,7 @@ export const useStore = create<UiState>((set, get) => {
       }
       case 'sessionUpsert': {
         const prev = get().sessions[msg.session.id];
+        const replacing = get().pendingCreate ? get().replaceOnCreate : null;
         set((state) => {
           // Auto-select on explicit intent, not on a clock. `createdAt` is stamped on
           // the bridge machine: hosted, that is a different computer, and a bridge
@@ -2885,10 +2911,17 @@ export const useStore = create<UiState>((set, get) => {
                 ? clearSent(state.sendingPrompts, msg.session.id)
                 : state.sendingPrompts,
             pendingCreate: claim ? false : state.pendingCreate,
+            replaceOnCreate: claim ? null : state.replaceOnCreate,
             selectedSessionId: claim ? msg.session.id : state.selectedSessionId,
             focusComposerFor: claim ? msg.session.id : state.focusComposerFor,
           };
         });
+        // The session the claim stood in for goes once its replacement is on
+        // screen, so the view never falls back to "nothing selected" meanwhile.
+        if (replacing && get().selectedSessionId === msg.session.id && replacing.sessionId !== msg.session.id) {
+          send({ type: 'deleteSession', sessionId: replacing.sessionId });
+          if (replacing.worktree) send({ type: 'removeWorktree', ...replacing.worktree });
+        }
         maybeAlert(prev, msg.session, {
           enabled: get().alertsEnabled,
           sound: get().alertSound,
@@ -3218,7 +3251,7 @@ export const useStore = create<UiState>((set, get) => {
         // what would have been lost (a dirty work tree, a branch that isn't merged),
         // and it used to be console-only — which is how "Remove did nothing" stayed
         // invisible. Also retires the same silence for compactContext/addGuardAllow.
-        set({ actionError: msg.message, worktreePending: false });
+        set({ actionError: msg.message, worktreePending: false, replaceOnCreate: null });
         break;
     }
     // Keep the app/dock badge and favicon in sync with session state.

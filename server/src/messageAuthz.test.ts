@@ -186,6 +186,19 @@ describe('MESSAGE_AUTHZ', () => {
     assert.equal(authorizeMessage(msg('setWorkflowStepOverrides', 's2'), scoped).ok, false);
   });
 
+  test('setPendingWorkflow needs the session and createSessions', () => {
+    // Picking a workflow for a fresh session is creating a workflow session.
+    assert.deepEqual(MESSAGE_AUTHZ.setPendingWorkflow, { needs: 'session', cap: 'createSessions' });
+    const machine = guest('collaborator', { scope: 'machine' });
+    assert.equal(authorizeMessage(msg('setPendingWorkflow', 's1'), machine).ok, true);
+    // A session share never holds createSessions, whatever its preset.
+    const scoped = guest('full', { scope: 'session', sessionIds: ['s1'] });
+    assert.equal(authorizeMessage(msg('setPendingWorkflow', 's1'), scoped).ok, false);
+    assert.equal(authorizeMessage(msg('setPendingWorkflow', 's1'), guest('prompt')).ok, false);
+    const noCreate = access({ prompt: true, setModel: true, manageWorkflow: true });
+    assert.equal(authorizeMessage(msg('setPendingWorkflow', 's1'), noCreate).ok, false);
+  });
+
   test('editQueued follows prompt, not interrupt', () => {
     // Named on purpose: editQueued sits at `prompt` while cancelQueued sits at
     // `interrupt`, which reads as an inconsistency worth "tidying up". It is not.

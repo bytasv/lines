@@ -5,15 +5,15 @@ import {
   Collapse,
   Divider,
   Group,
-  HoverCard,
   Loader,
+  Popover,
   Progress,
-  RingProgress,
   ScrollArea,
   Stack,
   Text,
   Tooltip,
   UnstyledButton,
+  type MantineTransition,
 } from '@mantine/core';
 import { useHover } from '@mantine/hooks';
 import { IconAlertTriangle, IconChevronRight } from '@tabler/icons-react';
@@ -37,7 +37,15 @@ import { useStore } from '../store';
 import { useSessionMachineHealth } from '../lib/can';
 import { useReveal } from '../lib/layout';
 import { send } from '../ws';
-import { formatDuration, formatSpendUsd, formatTokens, usageColor, withLiveSpend } from '../lib/format';
+import { formatDuration, formatSpendUsd, formatTokens, withLiveSpend } from '../lib/format';
+import styles from './Composer.module.css';
+
+/** The popover rises 8px into place, slightly scaled, on a spring-like curve. */
+const POPOVER_TRANSITION: MantineTransition = {
+  in: { opacity: 1, transform: 'translateY(0) scale(1)' },
+  out: { opacity: 0, transform: 'translateY(8px) scale(0.96)' },
+  transitionProperty: 'opacity, transform',
+};
 
 /** Category name as a lookup key: lowercased, with a trailing ` (deferred)`
  *  stripped, so a deferred row shares its category's colour and detail. */
@@ -256,6 +264,7 @@ function CategoryRow({
   detail,
   expanded,
   onToggle,
+  compact = false,
 }: {
   category: ContextCategory;
   /** null for deferred rows — they aren't in the window, so a share of it would lie. */
@@ -263,6 +272,8 @@ function CategoryRow({
   detail: React.ReactNode | null;
   expanded: boolean;
   onToggle: () => void;
+  /** The composer popover's row: name and tokens only, in its own type. */
+  compact?: boolean;
 }) {
   const { hovered, ref } = useHover<HTMLDivElement>();
   // On touch the chevron is the only sign a row can be expanded at all, so it is
@@ -300,16 +311,28 @@ function CategoryRow({
             />
           )}
         </Box>
-        <Text size="xs" truncate c={category.deferred ? 'dimmed' : undefined}>
-          {category.name}
-        </Text>
+        {compact ? (
+          <Text span truncate className={styles.cpKey} opacity={category.deferred ? 0.7 : undefined}>
+            {category.name}
+          </Text>
+        ) : (
+          <Text size="xs" truncate c={category.deferred ? 'dimmed' : undefined}>
+            {category.name}
+          </Text>
+        )}
       </Group>
-      <Text size="xs" fw={600}>
-        {formatTokens(category.tokens)}
-      </Text>
-      <Text size="xs" c="dimmed" w={PERCENT_W} ta="right">
-        {percent == null ? '—' : `${percent.toFixed(1)}%`}
-      </Text>
+      {compact ? (
+        <span className={styles.cpValue}>{formatTokens(category.tokens)}</span>
+      ) : (
+        <>
+          <Text size="xs" fw={600}>
+            {formatTokens(category.tokens)}
+          </Text>
+          <Text size="xs" c="dimmed" w={PERCENT_W} ta="right">
+            {percent == null ? '—' : `${percent.toFixed(1)}%`}
+          </Text>
+        </>
+      )}
     </Group>
   );
 
@@ -509,9 +532,11 @@ export function ContextWindowIndicator({
     inline, hasReading, health.connected, health.bridgeAttached,
     session.id, session.model, requestContextBreakdown,
   ]);
-  // Expansion state must live here, not in the dropdown: HoverCard unmounts its
+  // Expansion state must live here, not in the dropdown: the Popover unmounts its
   // dropdown on close, which would reset it every time the pointer leaves.
   const [open, setOpen] = useState<Set<string>>(new Set());
+  /** The composer's popover, opened by a click on the ring. */
+  const [opened, setOpened] = useState(false);
   const toggle = (key: string) =>
     setOpen((prev) => {
       const next = new Set(prev);
@@ -638,49 +663,162 @@ export function ContextWindowIndicator({
   );
   if (inline) return content;
 
+  // The composer's popover: what fills the window, the session's totals, and
+  // compaction — the categories keep their per-item detail behind a click.
+  const rows = view
+    ? view.categories.filter((c) => categoryKey(c.name) !== 'free space' && c.tokens > 0)
+    : [];
+  const promptTokens = usage ? usage.inputTokens + usage.cacheReadTokens + usage.cacheCreationTokens : 0;
+  const cacheHits = usage && promptTokens > 0 ? (usage.cacheReadTokens / promptTokens) * 100 : null;
+  const autoCompactNote =
+    view?.isAutoCompactEnabled === false
+      ? 'Auto-compact is off'
+      : view?.isAutoCompactEnabled && view.autoCompactThreshold != null
+        ? view.maxTokens > 0
+          ? `Auto-compacts at ${Math.round((view.autoCompactThreshold / view.maxTokens) * 100)}%`
+          : `Auto-compacts at ${formatTokens(view.autoCompactThreshold)}`
+        : '';
+  const compactBlock = contextCompactBlock(session);
+  const stat = (label: string, value: string) => (
+    <div className={styles.cpStat}>
+      <span className={styles.cpStatLabel}>{label}</span>
+      <span className={styles.cpStatValue}>{value}</span>
+    </div>
+  );
+  const popoverContent = (
+    <div className={styles.contextPopover}>
+      {view ? (
+        <div className={styles.cpRows}>
+          {rows.map((c) => (
+            <CategoryRow
+              key={c.name}
+              compact
+              category={c}
+              percent={null}
+              detail={
+                entry?.breakdown ? categoryDetail(categoryKey(c.name), c.deferred === true, entry.breakdown) : null
+              }
+              expanded={open.has(c.name)}
+              onToggle={() => toggle(c.name)}
+            />
+          ))}
+        </div>
+      ) : (
+        usage && <FallbackBody usage={usage} />
+      )}
+      {entry?.loading && <Loader size={10} />}
+      {compacted != null && (
+        <span className={styles.cpNote}>
+          {session.contextCompact?.trigger === 'auto'
+            ? 'Auto-compacted since the last measured turn'
+            : 'Compacted since the last measured turn'}
+          {` — ${formatTokens(compacted)} in context.`}
+        </span>
+      )}
+      {stale && (
+        <span className={styles.cpNote}>
+          The conversation was reset for a fresh step — this reading is from before that.
+        </span>
+      )}
+      {nearLimit && (
+        <Group gap={6} wrap="nowrap">
+          <IconAlertTriangle size={12} color="var(--mantine-color-orange-6)" />
+          <Text size="xs" c="orange">
+            Over {CONTEXT_WARN_PCT}% of the window — compacting now frees room for the rest of the task.
+          </Text>
+        </Group>
+      )}
+      <div className={styles.cpDivider} />
+      <div className={styles.cpStats}>
+        {session.totalTokens != null && stat('Session tokens', formatTokens(session.totalTokens))}
+        {cacheHits != null && stat('Cache hits', `${Math.round(cacheHits)}%`)}
+        {cost.usd != null && stat('Cost', formatSpendUsd(cost.usd, cost.estimated))}
+      </div>
+      <div className={styles.cpFooter}>
+        <span className={styles.cpNote}>{autoCompactNote}</span>
+        {/* Disabled in several legitimately different situations, so it always
+            states which one: the shared predicate's own `reason`. */}
+        <Tooltip
+          label={compactBlock?.reason ?? "Compact this session's context now"}
+          multiline
+          w={240}
+          withArrow
+          position="top"
+        >
+          <span style={{ display: 'flex' }}>
+            <UnstyledButton
+              className={styles.primaryButton}
+              disabled={compactBlock !== null}
+              onClick={() => {
+                send({ type: 'compactContext', sessionId: session.id });
+                setOpened(false);
+              }}
+            >
+              Compact now
+            </UnstyledButton>
+          </span>
+        </Tooltip>
+      </div>
+    </div>
+  );
+
   return (
-    <HoverCard
-      width="min(340px, calc(100vw - 2rem))"
-      position="top-end"
-      withArrow
-      shadow="md"
-      openDelay={100}
-      closeDelay={150}
+    <Popover
+      opened={opened}
+      onChange={setOpened}
       onOpen={() => requestContextBreakdown(session.id)}
+      width="min(354px, calc(100vw - 2rem))"
+      position="top-end"
+      offset={14}
+      withArrow
+      arrowSize={13}
+      arrowOffset={30}
+      transitionProps={{ transition: POPOVER_TRANSITION, duration: 260, timingFunction: 'cubic-bezier(0.22, 1.15, 0.36, 1)' }}
+      classNames={{
+        dropdown: `${styles.palette} ${styles.popover}`,
+        arrow: styles.popoverArrow,
+      }}
     >
-      <HoverCard.Target>
+      <Popover.Target>
         <UnstyledButton
+          className={styles.context}
           aria-label="Context window usage"
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 2,
-            opacity: stale ? 0.45 : 1,
-          }}
+          style={{ opacity: stale ? 0.45 : 1 }}
+          onClick={() => setOpened((o) => !o)}
         >
           {pct == null ? (
-            <Text size="xs" c="dimmed">
-              {formatTokens(fallbackUsed)} ctx
-            </Text>
+            `${formatTokens(fallbackUsed)} ctx`
           ) : (
-            // Bare ring, no label — the percentage lives in the hover card. A stale
-            // reading drops its colour too, so it can't read as a live measurement.
-            <RingProgress
-              size={18}
-              thickness={2}
-              sections={[{ value: pct, color: stale ? 'gray' : usageColor(pct) }]}
-            />
+            <>
+              {/* A stale reading drops its colour, so it can't read as a live measurement. */}
+              <span
+                className={styles.contextRing}
+                style={
+                  {
+                    '--ring-pct': `${pct}%`,
+                    '--ring-color': stale
+                      ? 'var(--composer-faint)'
+                      : nearLimit
+                        ? 'var(--mantine-color-orange-6)'
+                        : undefined,
+                  } as React.CSSProperties
+                }
+              >
+                <span className={styles.contextRingIn} />
+              </span>
+              {Math.round(pct)}%
+            </>
           )}
           {/* Passive warning only: compaction is lossy, irreversible and billable,
               so it stays a decision the user makes. */}
           {nearLimit && <IconAlertTriangle size={12} color="var(--mantine-color-orange-6)" />}
         </UnstyledButton>
-      </HoverCard.Target>
-      <HoverCard.Dropdown>
+      </Popover.Target>
+      <Popover.Dropdown p={16}>
         <ScrollArea.Autosize mah={480} type="auto">
-          {content}
+          {popoverContent}
         </ScrollArea.Autosize>
-      </HoverCard.Dropdown>
-    </HoverCard>
+      </Popover.Dropdown>
+    </Popover>
   );
 }

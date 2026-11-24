@@ -1,7 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import type {
   Actor,
+  PermissionMode,
   PromptAttachment,
+  ReasoningEffort,
   ServerMessage,
   SessionMeta,
   RoutingRule,
@@ -36,6 +38,7 @@ import {
   sanitizeStepOverrides,
   stepUpdateCandidate,
   validateWorkflow,
+  WORKFLOW_IMAGE_MAX_COUNT,
   type WorkflowStep,
 } from '@lines/shared';
 import type { Store } from './store.ts';
@@ -308,6 +311,16 @@ interface TrustBatch {
 
 export class WorkflowEngine {
   private workflows = new Map<string, WorkflowDef>();
+  /**
+   * A bare session's own model / mode / effort, taken the first time the
+   * new-session picker attaches a workflow to it (seeding step 0 overwrites
+   * them), so `detachPending` can put them back. In memory only: after a bridge
+   * restart a detach keeps step 0's values.
+   */
+  private preAttach = new Map<
+    string,
+    { model: string; permissionMode: PermissionMode; reasoningEffort?: ReasoningEffort }
+  >();
   /** Other users' published workflows — read-only, never persisted or pushed. */
   private shared = new Map<string, WorkflowDef>();
   /** This user's own published step heads, keyed by step id. */
@@ -1096,6 +1109,15 @@ export class WorkflowEngine {
         earliest(this.workflows.get(workflow.id)?.createdAt, workflow.createdAt) ?? Date.now();
     }
     this.normalizeRefs(workflow);
+    // The cover screenshot: URL strings only, at most WORKFLOW_IMAGE_MAX_COUNT.
+    // Whether a URL is one the bucket serves is storage's check (PUT /workflows).
+    if (workflow.images !== undefined) {
+      const images = Array.isArray(workflow.images)
+        ? workflow.images.filter((u): u is string => typeof u === 'string' && u.length > 0).slice(0, WORKFLOW_IMAGE_MAX_COUNT)
+        : [];
+      if (images.length) workflow.images = images;
+      else delete workflow.images;
+    }
     workflow.updatedAt = Date.now(); // LWW key for cross-instance sync
     workflow.ownerId = this.userId; // authoritative — never trust a client-sent owner
     const mark = markAfterSave('workflow', workflow, existingMark, requestedMark);
@@ -1229,6 +1251,79 @@ export class WorkflowEngine {
     } satisfies WorkflowState;
     this.seedStep0(meta, wf);
     this.sessions.setStatus(sessionId, meta.status); // persist + broadcast the attached workflow
+  }
+
+  /**
+   * Why a picker attach/detach is refused on this session, or undefined when the
+   * session is still fresh: nothing run, nothing in its transcript, no workflow
+   * under way and no goal driving turns.
+   */
+  private pendingRefusal(meta: SessionMeta): string | undefined {
+    if (meta.workflow?.started) return 'This session’s workflow has already started.';
+    if (goalDrivesTurns(meta.goal)) return 'A goal is driving this session.';
+    if (meta.claudeSessionId || meta.codexThreadId || meta.queued?.length) {
+      return 'A workflow can only be picked before the first prompt.';
+    }
+    if (this.store.loadTranscriptRaw(meta.id).length > 0) {
+      return 'A workflow can only be picked before the first prompt.';
+    }
+    return undefined;
+  }
+
+  /**
+   * The new-session picker: attach (or swap) a workflow on a session that has
+   * not run anything yet. It waits with `started: false` like a create-time
+   * attach, and the first prompt starts it through `startIfPending`. Throws with
+   * the reason when the session is no longer fresh, the workflow is gone, or its
+   * content is unverified.
+   */
+  attachPending(
+    sessionId: string,
+    source: { workflowId: string } | { def: WorkflowDef },
+    stepOverrides?: unknown,
+  ) {
+    const meta = this.sessions.get(sessionId);
+    if (!meta) return;
+    const refusal = this.pendingRefusal(meta);
+    if (refusal) throw new Error(refusal);
+    let wf: WorkflowDef;
+    let inline: WorkflowDef;
+    if ('def' in source) {
+      wf = inline = source.def;
+    } else {
+      const found = this.resolve(source.workflowId);
+      if (!found) throw new Error('That workflow no longer exists.');
+      if (this.untrustedParts(found).length > 0) throw new UntrustedWorkflowError(found.name);
+      wf = found;
+      inline = this.snapshotOf(found);
+    }
+    // Only a bare session's values are worth restoring: on a swap the session
+    // already carries the previous workflow's step 0.
+    if (!meta.workflow && !this.preAttach.has(sessionId)) {
+      this.preAttach.set(sessionId, {
+        model: meta.model,
+        permissionMode: meta.permissionMode,
+        ...(meta.reasoningEffort !== undefined ? { reasoningEffort: meta.reasoningEffort } : {}),
+      });
+    }
+    this.attachDef(sessionId, wf, inline, stepOverrides);
+  }
+
+  /** Undo `attachPending`: back to a bare session on the settings it had before. */
+  detachPending(sessionId: string) {
+    const meta = this.sessions.get(sessionId);
+    if (!meta?.workflow) return;
+    const refusal = this.pendingRefusal(meta);
+    if (refusal) throw new Error(refusal);
+    const before = this.preAttach.get(sessionId);
+    this.preAttach.delete(sessionId);
+    if (before) {
+      meta.model = before.model;
+      meta.permissionMode = before.permissionMode;
+      meta.reasoningEffort = before.reasoningEffort;
+    }
+    meta.workflow = undefined;
+    this.sessions.setStatus(sessionId, meta.status);
   }
 
   /**
@@ -1384,6 +1479,7 @@ export class WorkflowEngine {
     if (goalDrivesTurns(meta.goal)) return false;
     meta.workflow.started = true;
     meta.workflow.task = userText;
+    this.preAttach.delete(sessionId);
     this.sessions.maybeAutoName(sessionId, userText);
     this.runStepSafely(sessionId, undefined, true, attachments, actor);
     return true;

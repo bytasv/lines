@@ -11,7 +11,7 @@ import type {
   WorkflowState,
   WorkflowStepOverride,
 } from '@lines/shared';
-import { sanitizeStepOverrides, validateStepContent } from '@lines/shared';
+import { providerForModel, sanitizeStepOverrides, validateStepContent } from '@lines/shared';
 import { GuardAllowlist } from './autoGuard.ts';
 import { SessionManager } from './sessions.ts';
 import { createStore } from './store.ts';
@@ -311,4 +311,35 @@ test('an OpenAI override never reaches the step', async () => {
   const m = h.s1();
   assert.equal(m.model, 'claude-opus-5-5');
   assert.equal(m.claudeSessionId, 'claude-abc');
+});
+
+test('a picker attach seeds step 0’s provider, model and effort, as at create', () => {
+  const h = harness('gpt-5.6-terra', true);
+  h.workflows.save({
+    id: 'wf-openai',
+    name: 'openai first',
+    steps: [
+      {
+        name: 'Step 1',
+        promptTemplate: 'do step 1',
+        model: 'gpt-5.6-terra',
+        permissionMode: 'default',
+        autoAdvance: false,
+        freshStart: false,
+        reasoningEffort: 'high',
+      },
+    ],
+  });
+  const fresh = h.sessions.createSession({
+    name: 'fresh',
+    cwd: '/tmp',
+    model: 'claude-sonnet-5-5',
+    permissionMode: 'acceptEdits',
+  });
+  h.workflows.attachPending(fresh.id, { workflowId: 'wf-openai' });
+  const m = h.sessions.get(fresh.id)!;
+  assert.equal(m.model, 'gpt-5.6-terra');
+  assert.equal(providerForModel(m.model), 'openai');
+  assert.equal(m.reasoningEffort, 'high');
+  assert.equal(m.permissionMode, 'default');
 });

@@ -1,0 +1,813 @@
+/* The desktop composer: a card on a 1px wrap that carries the running ring.
+   Colours go through `.palette` so the dropdowns, which render in a portal
+   outside the card, read the same surface, border and text shades. */
+
+.palette {
+  --composer-surface: light-dark(var(--mantine-color-white), var(--mantine-color-dark-6));
+  --composer-sunken: light-dark(var(--mantine-color-gray-1), var(--mantine-color-dark-7));
+  --composer-border: light-dark(var(--mantine-color-gray-3), var(--mantine-color-dark-4));
+  --composer-hover: light-dark(var(--mantine-color-gray-1), var(--mantine-color-dark-5));
+  --composer-text: light-dark(var(--mantine-color-black), var(--mantine-color-dark-0));
+  --composer-strong: light-dark(var(--mantine-color-gray-8), var(--mantine-color-dark-1));
+  --composer-muted: light-dark(var(--mantine-color-gray-7), var(--mantine-color-dark-2));
+  --composer-faint: light-dark(var(--mantine-color-gray-6), var(--mantine-color-dark-3));
+  --composer-shadow: light-dark(rgba(0, 0, 0, 0.14), rgba(0, 0, 0, 0.6));
+}
+
+.root {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  /* 920px, keeping a 16px margin either side once the window is narrower. */
+  width: min(920px, calc(100% - 32px));
+  margin-inline: auto;
+  padding: 4px 0 16px;
+}
+
+.wrap {
+  position: relative;
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  padding: 1px;
+  border-radius: 21px;
+}
+
+/* Running: a blurred halo behind the card and a sharp ring along its edge. */
+.halo,
+.ring {
+  position: absolute;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.halo {
+  inset: -1px;
+  border-radius: 22px;
+  filter: blur(4px);
+  animation: composer-fade-in 600ms ease-out both;
+}
+
+.ring {
+  inset: 0;
+  border-radius: 21px;
+  animation: composer-fade-in 500ms ease-out both;
+}
+
+.halo[data-exiting],
+.ring[data-exiting] {
+  animation: composer-fade-out 400ms ease-in both;
+}
+
+.spinner {
+  position: absolute;
+  top: -625px;
+  left: -240px;
+  width: 1400px;
+  height: 1400px;
+  animation: composer-spin 3500ms linear infinite;
+}
+
+/* Opacity sits on the spinners: the halo and ring fade in and out to 1. */
+.haloSpinner {
+  opacity: 0.18;
+  background: conic-gradient(
+    rgba(75, 132, 190, 0) 0deg,
+    rgba(75, 132, 190, 0) 290deg,
+    rgba(133, 182, 233, 0.6) 330deg,
+    rgba(75, 132, 190, 0) 360deg
+  );
+}
+
+.ringSpinner {
+  opacity: 0.6;
+  background: conic-gradient(
+    rgba(75, 132, 190, 0) 0deg,
+    rgba(75, 132, 190, 0) 300deg,
+    rgba(169, 207, 247, 0.7) 335deg,
+    rgba(75, 132, 190, 0) 360deg
+  );
+}
+
+.card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0 14px 10px;
+  background: var(--composer-surface);
+  border: 1px solid rgba(150, 142, 212, 0.3);
+  border-radius: 20px;
+  box-shadow: 0 10px 32px rgba(150, 142, 212, 0.07);
+  transition:
+    border-color 300ms ease,
+    box-shadow 400ms ease;
+}
+
+.edge {
+  height: 1px;
+  min-height: 1px;
+  margin: 0 80px 12px;
+  background: linear-gradient(
+    90deg,
+    rgba(150, 142, 212, 0),
+    rgba(200, 196, 246, 0.45),
+    rgba(150, 142, 212, 0)
+  );
+  transition: background 300ms ease;
+}
+
+/* The card takes the colour of the permission mode: Plan violet (the default
+   above), Full Auto teal, every other mode neutral. */
+.card:where(:not([data-mode='plan']):not([data-mode='bypassPermissions'])) {
+  border-color: light-dark(var(--mantine-color-gray-3), #3a3a3a);
+  box-shadow: 0 10px 32px light-dark(rgba(0, 0, 0, 0.08), rgba(0, 0, 0, 0.3));
+}
+
+.card:where(:not([data-mode='plan']):not([data-mode='bypassPermissions'])) > .edge {
+  background: linear-gradient(
+    90deg,
+    rgba(212, 212, 212, 0),
+    rgba(212, 212, 212, 0.16),
+    rgba(212, 212, 212, 0)
+  );
+}
+
+.card[data-mode='bypassPermissions'] {
+  border-color: rgba(64, 173, 155, 0.32);
+  box-shadow: 0 10px 32px rgba(64, 173, 155, 0.07);
+}
+
+.card[data-mode='bypassPermissions'] > .edge {
+  background: linear-gradient(
+    90deg,
+    rgba(64, 173, 155, 0),
+    rgba(152, 218, 204, 0.45),
+    rgba(64, 173, 155, 0)
+  );
+}
+
+/* Running wins over the mode colour: a faint blue edge under the thin ring. */
+.card[data-running] {
+  border-color: rgba(133, 182, 233, 0.12);
+  box-shadow: 0 0 8px rgba(75, 132, 190, 0.08);
+}
+
+.card[data-running] > .edge {
+  margin-inline: 120px;
+  background: linear-gradient(
+    90deg,
+    rgba(133, 182, 233, 0),
+    rgba(169, 207, 247, 0.25),
+    rgba(133, 182, 233, 0)
+  );
+}
+
+/* Attachments */
+
+.attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 0 4px;
+}
+
+.file {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px;
+  border: 1px solid var(--composer-border);
+  border-radius: 12px;
+  background: var(--composer-hover);
+  animation: composer-pop-in 260ms cubic-bezier(0.34, 1.4, 0.64, 1) both;
+}
+
+.fileThumb {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  overflow: hidden;
+  border-radius: 7px;
+  background: linear-gradient(135deg, rgb(118, 118, 118), rgb(58, 58, 58));
+}
+
+.fileThumb img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.fileMeta {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  width: 158px;
+  min-width: 0;
+}
+
+.fileName {
+  overflow: hidden;
+  color: var(--composer-text);
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 14.5px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.fileSize {
+  color: var(--composer-faint);
+  font-size: 11px;
+  line-height: 13px;
+}
+
+.fileRemove {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  border-radius: 11px;
+  color: var(--composer-muted);
+  font-size: 15px;
+  line-height: 17.5px;
+}
+
+.fileRemove:hover {
+  color: var(--composer-text);
+  background: var(--composer-border);
+}
+
+/* Toolbar */
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-height: 34px;
+}
+
+.tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.anchor {
+  position: relative;
+  display: flex;
+}
+
+.iconButton {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  border-radius: 10px;
+  color: var(--composer-muted);
+  transition:
+    background 150ms ease,
+    color 150ms ease;
+}
+
+.iconButton:hover:not(:disabled),
+.iconButton[data-active] {
+  color: var(--composer-text);
+}
+
+.iconButton:hover:not(:disabled) {
+  background: var(--composer-hover);
+}
+
+.iconButton:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.divider {
+  width: 1px;
+  height: 18px;
+  flex-shrink: 0;
+  background: var(--composer-border);
+}
+
+.modes {
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 10px;
+  background: var(--composer-sunken);
+}
+
+.mode {
+  display: flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 7px;
+  color: var(--composer-faint);
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 14.5px;
+  transition:
+    background 200ms ease,
+    color 200ms ease;
+}
+
+.mode:hover:not(:disabled) {
+  color: var(--composer-text);
+}
+
+.mode[data-active] {
+  color: var(--composer-text);
+  background: var(--composer-hover);
+}
+
+.mode[data-active][data-mode='plan'] {
+  color: light-dark(#5f56b8, #c8c4f6);
+  background: rgba(150, 142, 212, 0.16);
+}
+
+.mode[data-active][data-mode='bypassPermissions'] {
+  color: light-dark(#2a7d6f, #98dacc);
+  background: rgba(64, 173, 155, 0.16);
+}
+
+.mode:disabled {
+  cursor: not-allowed;
+}
+
+.picker {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 30px;
+  padding: 0 10px;
+  border-radius: 9px;
+  color: var(--composer-strong);
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 14.5px;
+  white-space: nowrap;
+  /* Never squeezed narrower than its label. */
+  flex-shrink: 0;
+  min-width: max-content;
+}
+
+.picker:hover:not(:disabled) {
+  background: var(--composer-hover);
+}
+
+.picker:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.cost {
+  color: var(--composer-muted);
+  font-size: 12px;
+}
+
+/* Send and Stop */
+
+.send,
+.stop {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  flex-shrink: 0;
+  border-radius: 17px;
+}
+
+.send {
+  color: var(--composer-faint);
+  background: var(--composer-hover);
+  transition:
+    background 150ms ease,
+    color 150ms ease,
+    transform 120ms ease;
+}
+
+.send[data-ready] {
+  color: var(--composer-sunken);
+  background: var(--composer-text);
+}
+
+.send:disabled {
+  cursor: not-allowed;
+}
+
+.send:active:not(:disabled),
+.stop:active:not(:disabled) {
+  transform: scale(0.92);
+}
+
+.stop {
+  background: var(--composer-text);
+  animation: composer-spring-in 320ms cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+.stop:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.stopSquare {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  background: var(--composer-sunken);
+}
+
+/* Menus and popovers (rendered in a portal: pair with `.palette`) */
+
+.menu {
+  padding: 6px;
+  border: 1px solid var(--composer-border);
+  border-radius: 14px;
+  background: var(--composer-surface);
+  box-shadow: 0 20px 50px var(--composer-shadow);
+}
+
+/* The model menu grows to fit its longest model name and description, from the
+   design's 234px up to what the window allows. */
+.modelMenu {
+  min-width: 234px;
+  max-width: min(420px, calc(100vw - 32px));
+}
+
+.menuLabel {
+  margin: 6px 10px 4px;
+  padding: 0;
+  color: var(--composer-faint);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 13px;
+  letter-spacing: 0.44px;
+  text-transform: uppercase;
+}
+
+.menuItem {
+  padding: 8px 10px;
+  border-radius: 8px;
+}
+
+.menuItem[data-hovered] {
+  background: var(--composer-hover);
+}
+
+.menuItem[data-unavailable] {
+  cursor: not-allowed;
+}
+
+.menuRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.menuItemLabel {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--composer-text);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 15px;
+}
+
+.menuItem[data-unavailable] .menuItemLabel {
+  color: var(--composer-faint);
+}
+
+.menuItemHint {
+  color: var(--composer-faint);
+  font-size: 12px;
+  line-height: 14px;
+  text-align: right;
+}
+
+.popover {
+  border: 1px solid var(--composer-border);
+  border-radius: 16px;
+  background: var(--composer-surface);
+  box-shadow: 0 20px 50px var(--composer-shadow);
+}
+
+.popoverArrow {
+  border-color: var(--composer-border);
+  background: var(--composer-surface);
+}
+
+/* Dictation */
+
+.dictation {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.dictationHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.dictationTitle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--composer-text);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 15px;
+}
+
+.recordingDot {
+  width: 8px;
+  height: 8px;
+  flex-shrink: 0;
+  border-radius: 4px;
+  background: #bf5f5a;
+  animation: composer-pulse 1100ms ease-in-out infinite;
+}
+
+.dictationTimer {
+  color: var(--composer-faint);
+  font-size: 12px;
+  line-height: 14px;
+  font-variant-numeric: tabular-nums;
+}
+
+.waveform {
+  display: flex;
+  align-items: center;
+  height: 44px;
+  padding: 0 10px;
+  border-radius: 10px;
+  color: var(--composer-strong);
+  background: var(--composer-sunken);
+}
+
+.waveformTrack {
+  flex: 1 1 0;
+  min-width: 0;
+  height: 32px;
+}
+
+.dictationText {
+  color: var(--composer-muted);
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.ghostButton,
+.primaryButton {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 9px;
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 14.5px;
+  white-space: nowrap;
+}
+
+.ghostButton {
+  color: var(--composer-muted);
+}
+
+.ghostButton:hover:not(:disabled) {
+  color: var(--composer-text);
+  background: var(--composer-hover);
+}
+
+.primaryButton {
+  color: var(--composer-sunken);
+  background: var(--composer-text);
+  transition: transform 120ms ease;
+}
+
+.primaryButton:hover:not(:disabled) {
+  background: var(--composer-strong);
+}
+
+.primaryButton:active:not(:disabled) {
+  transform: scale(0.96);
+}
+
+.primaryButton:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Context window (ContextWindowIndicator, desktop) */
+
+.context {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 8px;
+  border-radius: 9px;
+  color: var(--composer-muted);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 14px;
+  white-space: nowrap;
+  transition: background 150ms ease;
+}
+
+.context:hover {
+  color: var(--composer-text);
+  background: var(--composer-hover);
+}
+
+.contextRing {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  border-radius: 7px;
+  background: conic-gradient(
+    var(--ring-color, var(--composer-strong)) 0 var(--ring-pct, 0%),
+    var(--composer-border) var(--ring-pct, 0%) 100%
+  );
+}
+
+.contextRingIn {
+  width: 8px;
+  height: 8px;
+  border-radius: 4px;
+  background: var(--composer-surface);
+}
+
+.contextPopover {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.cpRows {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.cpKey {
+  color: var(--composer-muted);
+  font-size: 12.5px;
+  line-height: 14.5px;
+}
+
+.cpValue {
+  color: var(--composer-text);
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 14.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.cpDivider {
+  height: 1px;
+  min-height: 1px;
+  background: var(--composer-border);
+}
+
+.cpStats {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.cpStat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.cpStatLabel {
+  color: var(--composer-faint);
+  font-size: 11px;
+  line-height: 13px;
+}
+
+.cpStatValue {
+  color: var(--composer-text);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 15px;
+}
+
+.cpFooter {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 30px;
+}
+
+.cpNote {
+  color: var(--composer-faint);
+  font-size: 11.5px;
+  line-height: 13.5px;
+}
+
+@keyframes composer-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes composer-fade-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes composer-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes composer-pop-in {
+  from {
+    opacity: 0;
+    scale: 0.9;
+  }
+  to {
+    opacity: 1;
+    scale: 1;
+  }
+}
+
+@keyframes composer-spring-in {
+  from {
+    opacity: 0;
+    scale: 0.6;
+  }
+  to {
+    opacity: 1;
+    scale: 1;
+  }
+}
+
+@keyframes composer-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spinner,
+  .recordingDot {
+    animation: none;
+  }
+
+  .halo,
+  .ring,
+  .file,
+  .stop {
+    animation-duration: 1ms;
+  }
+}

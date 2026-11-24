@@ -1,6 +1,24 @@
 {
   "web": [
     {
+      "version": "0.1.48",
+      "date": "2026-11-24",
+      "items": [
+        {
+          "text": "A new session now opens on a \"How do you want to start?\" view: pick plain chat or a recent workflow before your first prompt, and switch freely until you send it.",
+          "image": "web-0.1.48-new-session-picker.png"
+        },
+        {
+          "text": "Workflows can have a cover screenshot, set in the workflow editor and shown on the workflow's card when you start a new session.",
+          "image": "web-0.1.48-workflow-cover.png"
+        },
+        {
+          "text": "The desktop composer has a new look: a rounded card that glows while a turn runs, attachments as chips with their name and size, and a running timer while you dictate.",
+          "image": "web-0.1.48-composer-restyle.png"
+        }
+      ]
+    },
+    {
       "version": "0.1.47",
       "date": "2026-11-20",
       "items": [

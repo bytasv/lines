@@ -212,6 +212,10 @@ version is skipped and counted in the response's `skipped`.
 
 ## Business rules
 
+- A workflow's cover screenshot reuses the recipe image picker (`RecipeImages`, with its `maxCount`
+  and `subject` props). Storage `PUT /workflows` skips any workflow whose cover images include a
+  URL outside this deployment's bucket (`hasOnlyServedImages`), the same rule as `PUT /recipes`; the row is
+  never rewritten, because its signature covers the original content.
 - Exactly one of `prompt` / `members` is populated on a `RecipeContent`; a
   bundle's members must all be leaves (no nesting — this alone removes cycle
   detection, depth limits, and unbounded expansion); `2 ≤ members.length ≤

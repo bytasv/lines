@@ -11,6 +11,8 @@ import * as pageLinesTest from './scenarios/page-lines-test';
 import * as page17919581889488394 from './scenarios/page-17919581889488394';
 import * as page17919650064905394 from './scenarios/page-17919650064905394';
 import * as capture1791980722496 from './scenarios/capture-1791980722496';
+import * as capture1795445993512 from './scenarios/capture-1795445993512';
+import * as capture1795452972276 from './scenarios/capture-1795452972276';
 // Settings › Updates reads __LINES_VERSION__ while it renders.
 import './mocks/viteDefines';
 
@@ -25,15 +27,21 @@ const SCENARIOS: Record<
     sessionSort?: string;
     /** Whether the sidebar's archived group was unfolded on the page. */
     showArchived?: boolean;
+    /** Other localStorage keys the page's islands read, e.g. folded sidebar groups. */
+    storage?: Record<string, unknown>;
     account?: { imageUrl?: string; alt?: string };
     /** The page's window, as the CSS variables ./decorators sizes the shell from. */
     layout?: Record<string, string>;
+    /** Puts back nested prop fields the capture dropped, in place, for this scenario's islands. */
+    patchProps?: (props: Record<string, unknown>) => void;
   }
 > = {
   'page-lines-test': pageLinesTest,
   'page-17919581889488394': page17919581889488394,
   'page-17919650064905394': page17919650064905394,
   'capture-1791980722496': capture1791980722496,
+  'capture-1795445993512': capture1795445993512,
+  'capture-1795452972276': capture1795452972276,
 };
 
 /**
@@ -84,8 +92,12 @@ function StorageOverride({ values, children }: { values: Record<string, unknown>
 }
 
 /** The sidebar's localStorage values a scenario names, or null when it names none. */
-function scenarioStorage(scenario: { sessionSort?: string; showArchived?: boolean }) {
-  const values: Record<string, unknown> = {};
+function scenarioStorage(scenario: {
+  sessionSort?: string;
+  showArchived?: boolean;
+  storage?: Record<string, unknown>;
+}) {
+  const values: Record<string, unknown> = { ...scenario.storage };
   if (scenario.sessionSort) values[SESSION_SORT_KEY] = scenario.sessionSort;
   if (scenario.showArchived !== undefined) values[SHOW_ARCHIVED_KEY] = scenario.showArchived;
   return Object.keys(values).length ? values : null;
@@ -190,10 +202,11 @@ export default {
      * A captured page's islands carry its scenario: its store fields, account and
      * sidebar order (see ./scenarios) apply to those islands only.
      */
-    (Story: ComponentType, context: { kubi?: { scenario?: string } }) => {
+    (Story: ComponentType, context: { kubi?: { scenario?: string }; args?: Record<string, unknown> }) => {
       const name = context.kubi?.scenario;
       const scenario = name ? SCENARIOS[name] : undefined;
       if (!name || !scenario) return <Story />;
+      if (scenario.patchProps && context.args) scenario.patchProps(context.args);
       const storage = STORAGE[name];
       let node = (
         <StoreOverrides value={scenario.store}>

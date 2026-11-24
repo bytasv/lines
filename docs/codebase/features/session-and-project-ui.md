@@ -16,6 +16,10 @@ and how status is surfaced in the sidebar row and the project tab.
 - **Composer focus on a new session** — when a brand-new session is created, focus the prompt
   textarea automatically so the user can type immediately without clicking into it. Driven by the
   same create-intent signal as session-create auto-select (below), not a `createdAt` age check.
+- **New-session workflow picker** — a fresh session (nothing run, empty transcript, not read-only)
+  shows workflow cards in place of the transcript. Picking a card attaches that workflow before the
+  first prompt; the choice can be swapped or undone. Leaving a session reopens only a fresh one, so
+  the user lands on the picker rather than an empty conversation.
 - **Project switch session selection** — decide which session is shown when the active project
   changes (tab click, `hello`/reconnect, or a `/session/<id>` deep link): keep an already-valid
   selection, or fall back to the project's own last-selected session
@@ -66,6 +70,7 @@ and how status is surfaced in the sidebar row and the project tab.
 
 ## Entry points
 
+- `web/src/components/NewSessionPicker.tsx` — the workflow-card view that replaces the transcript on a fresh session
 - `web/src/components/Composer.tsx`
 - `web/src/components/ProjectTabs.tsx` — tab click; the tab row shown in the app header
 - `web/src/ws.ts` — `openProject` (server-initiated project switch)
@@ -199,7 +204,7 @@ and how status is surfaced in the sidebar row and the project tab.
   the old global `lines.showArchived`, which is migrated once and removed
 - `UserUiSettings.sessionPrefs` — `Record<projectKey, ProjectSessionPrefs>` (`shared/types.ts`), keyed
   like `sessionGroups`; each entry holds `sort`, `newSessionChoice`, `worktree` and `sidebarMode`,
-  any of which may be absent. Mirrored to the `lines.sessionPrefs` localStorage cache. Written only by
+  any of which may be absent. `newSessionChoice` now only seeds the picker's fallback card. Mirrored to the `lines.sessionPrefs` localStorage cache. Written only by
   `setSessionPrefs(groupKey, patch)`, which merges the patch and calls `pushSettings` (not for a guest)
 - `SessionSort` (`shared/types.ts`) — the sort union; `lib/format.ts` re-exports it
 - `withSeen(seen, ids)` — returns `seen` unchanged when every id is already present, so a no-op
@@ -212,6 +217,12 @@ and how status is surfaced in the sidebar row and the project tab.
   instead of a `createdAt`-age check, so it isn't fooled by clock skew between the bridge and the
   browser (see session-create auto-select) and can't re-fire on a later switch back to the session
 - `takeComposerFocus()` — clears `focusComposerFor`; called once by the composer that consumes it
+- `showsNewSessionView(session, view)` (`lib/recentWorkflows.ts`) — the picker gate: transcript loaded
+  and empty, not sending, nothing offline-queued, not read-only, and still fresh
+- `recentWorkflows(...)` (`lib/recentWorkflows.ts`) — the picker's cards, most recent first; the
+  project's `newSessionChoice` pref stands in when none qualifies
+- `replaceOnCreate` (store field) — names the unstarted session a new create supersedes and its own
+  work tree; that session and tree are removed once the replacement lands
 - `seenSessionIds` (store field) — every session id this browser has ever been told about, via
   either `hello` or `sessionUpsert`; maintained so a session can never look "new" a second time
 - `markSessionCreatePending()` — called by every `createSession` sender (the sidebar's New
@@ -258,6 +269,16 @@ On a phone, closing the sidebar drawer on create (see [mobile-client](mobile-cli
 gap between the tap and this effect running (a `sessionUpsert` round-trip), during which iOS would
 otherwise drop the keyboard it needs a synchronous in-gesture `focus()` to keep open — the sidebar
 covers that half with a keyboard-primer input; see mobile-client's business rules.
+
+### New-session workflow picker
+
+`showsNewSessionView` decides whether the picker shows. A card pick calls `setPendingWorkflow`
+through the create hooks (`lib/useCreateSession.ts`), and the bridge's `WorkflowEngine.attachPending`
+attaches the workflow with `started: false`; the first prompt starts it. Picking another card swaps
+the attached workflow, and undo calls `detachPending`. The bridge keeps the model, permission mode and
+reasoning effort the session had before its first attach and restores them on detach. Those values
+live only in memory, so after a bridge restart a detach keeps step 0's model and mode. Attach and
+detach are refused once anything has run (see business rules).
 
 ### Session-create auto-select
 
@@ -415,6 +436,12 @@ and "auto-select needs `pendingCreate`" is the recommended follow-up.
 
 ## Business rules
 
+- The new-session picker works only before the first prompt. Attach, swap and detach are refused once
+  the session has a Claude or Codex thread, queued prompts, transcript entries, a started workflow, or
+  a goal driving its turns.
+- `setPendingWorkflow` is authorized with `createSessions`, so a guest with a session-scoped share
+  cannot use the picker.
+- The picker never attaches unverified (untrusted) workflow content; the server refuses it.
 - The persisted text draft is the full `MentionValue`, not plain text — restoring a draft must
   keep its `@mention` pills and expansions intact, not just the raw characters.
 - Staged attachments persist across reload too; they live in IndexedDB rather than

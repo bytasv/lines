@@ -4,8 +4,7 @@ Covers: `context-window-inspector`, `context-compaction`.
 
 ## Purpose
 
-Show live context-window occupancy in the composer — a small ring chip, and on hover a
-breakdown of what is filling the window (system prompt, tools, MCP servers, memory files,
+Show live context-window occupancy in the composer — a small ring chip, and a popover opened from it with a breakdown of what is filling the window (system prompt, tools, MCP servers, memory files,
 skills, agents, messages), so the user can see how full the context is and what's driving it,
 distinct from the cumulative billing figures shown elsewhere.
 
@@ -19,7 +18,7 @@ corrects the occupancy reading afterwards.
 ## Entry points
 
 - Composer toolbar `ContextWindowIndicator` chip, next to the cumulative `totalCostUsd` text.
-- `ContextWindowIndicator`'s "Compact now" button (in its hover-card dropdown).
+- `ContextWindowIndicator`'s "Compact now" button (in its popover).
 - Passive near-limit warning badge on the same indicator.
 
 ## Files
@@ -41,7 +40,7 @@ corrects the occupancy reading afterwards.
 - `web/src/store.ts` — `contextBreakdowns` state, `requestContextBreakdown`
 - `web/src/lib/transcript.ts` — `'context-compact'` event → `ContextCompactItem`
 - `web/src/components/Transcript.tsx` — `ContextCompactMarker`
-- `web/src/components/ContextWindowIndicator.tsx` — ring chip, hover card, `CompactButton`,
+- `web/src/components/ContextWindowIndicator.tsx` — ring chip, popover, `CompactButton`,
   near-limit badge
 - `web/src/lib/format.ts` — `formatTokens`, `usageColor`
 
@@ -83,7 +82,7 @@ persisted + synced). A failed ask (no live session, worker down, older CLI) reso
 is not logged as an error.
 
 Browser: `sessionUpsert` carries `contextUsage`/`contextSummary`/`contextResetAt` like any other
-`SessionMeta` field — no dedicated push message. Hovering the chip additionally sends
+`SessionMeta` field — no dedicated push message. Opening the popover additionally sends
 `{type: 'contextBreakdown', sessionId}`; the bridge re-asks the worker and replies
 `{type: 'contextBreakdown', sessionId, breakdown}` with the full per-item detail (MCP tools by
 server, memory file paths, agents, skills, message composition), held only in
@@ -188,8 +187,8 @@ ring/warning from `effectiveContextTokens` on every `SessionMeta` update.
   per-item detail — it is persisted to disk and pushed through storage sync, so it must stay
   small; per-item detail (MCP tools, memory files, agents, skills) is fetched on demand and
   never persisted.
-- A hover-triggered summary refresh only upserts (broadcasts + syncs) when the summary actually
-  changed, so opening the hover card repeatedly does not generate sync traffic.
+- A popover-triggered summary refresh only upserts (broadcasts + syncs) when the summary actually
+  changed, so opening the popover repeatedly does not generate sync traffic.
 - When a workflow step resets the Claude session (fresh start), `contextResetAt` is stamped; any
   reading older than that is rendered as stale (dimmed ring, explanatory footnote) until the
   next turn reports a fresh value — the underlying conversation it described no longer exists.
@@ -201,7 +200,7 @@ ring/warning from `effectiveContextTokens` on every `SessionMeta` update.
   the ring with a number that isn't the main agent's — see
   [transcript-rendering](transcript-rendering.md).
 - Lines does not set `autoCompactEnabled` and has no control over the CLI's own background
-  auto-compaction — the hover card's auto-compact row (`isAutoCompactEnabled`,
+  auto-compaction — the popover's auto-compact row (`isAutoCompactEnabled`,
   `autoCompactThreshold`) is a straight passthrough of whatever the CLI itself resolved through
   `settingSources`. The row is shown even when the CLI reports it off, naming the CLI as the
   owner, rather than hidden — so "off" reads as a setting, not a missing feature.

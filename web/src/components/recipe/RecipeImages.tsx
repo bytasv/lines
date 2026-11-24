@@ -31,10 +31,16 @@ export function RecipeImages({
   images,
   readOnly,
   onChange,
+  maxCount = RECIPE_IMAGE_MAX_COUNT,
+  subject = 'recipe',
 }: {
   images: string[];
   readOnly: boolean;
   onChange: (images: string[]) => void;
+  /** How many images the item may carry (a workflow's cover is one). */
+  maxCount?: number;
+  /** What still saves when an upload fails, for the error line. */
+  subject?: string;
 }) {
   const uploads = useStore((s) => s.recipeUploads);
   const trackRecipeUpload = useStore((s) => s.trackRecipeUpload);
@@ -42,7 +48,7 @@ export function RecipeImages({
   const [error, setError] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const remaining = RECIPE_IMAGE_MAX_COUNT - images.length - pending.length;
+  const remaining = maxCount - images.length - pending.length;
 
   // Adopt finished uploads. Kept in an effect (not the send callback) so the
   // reply is handled the same way whichever tab/socket event delivers it.
@@ -55,7 +61,7 @@ export function RecipeImages({
     setPending((p) => p.filter((id) => !done.includes(id)));
     for (const id of done) trackRecipeUpload(id, null);
     if (failed) setError(uploads[failed]?.error ?? 'Upload failed.');
-    if (urls.length) onChange([...images, ...urls].slice(0, RECIPE_IMAGE_MAX_COUNT));
+    if (urls.length) onChange([...images, ...urls].slice(0, maxCount));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [uploads, pending]);
 
@@ -139,7 +145,7 @@ export function RecipeImages({
           <Group gap={8} justify="center">
             <IconUpload size={16} opacity={0.7} />
             <Text size="xs" c="dimmed">
-              Drop screenshots or click to pick — {remaining} of {RECIPE_IMAGE_MAX_COUNT} left
+              Drop screenshots or click to pick — {remaining} of {maxCount} left
             </Text>
           </Group>
         </Box>
@@ -159,7 +165,7 @@ export function RecipeImages({
 
       {error && (
         <Alert variant="light" color="yellow" p="xs" icon={<IconAlertTriangle size={16} />} withCloseButton onClose={() => setError(null)}>
-          <Text size="xs">{error} The recipe still saves without screenshots.</Text>
+          <Text size="xs">{error} The {subject} still saves without screenshots.</Text>
         </Alert>
       )}
     </Stack>

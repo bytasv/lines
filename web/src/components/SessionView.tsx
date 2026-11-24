@@ -55,6 +55,9 @@ import { InlineSessionName } from './InlineSessionName';
 import { ReadOnlySessionNotice } from './ReadOnlySessionNotice';
 import { OfflineQueuedMessages, QueuedMessages, SendingMessages, SteeringMessages } from './QueuedMessages';
 import { WorkflowStepper } from './WorkflowStepper';
+import { NewSessionPicker } from './NewSessionPicker';
+import pickerStyles from './NewSessionPicker.module.css';
+import { showsNewSessionView } from '../lib/recentWorkflows';
 import { ShareModal } from './ShareModal';
 import { MachineDot } from './MachineDot';
 import { PresenceStack } from './PresenceStack';
@@ -196,8 +199,18 @@ export function SessionView({ sessionId }: { sessionId: string }) {
   const canRename = useCanOnSession(sessionId, 'manageSessions') && !session?.readOnly;
   const [renaming, setRenaming] = useState(false);
   useEffect(() => setRenaming(false), [sessionId]);
+  // The new-session picker's gate inputs: anything on its way in (sending, or
+  // held for a reconnect) means the session is no longer empty.
+  const canCreate = useCanOnSession(sessionId, 'createSessions');
+  const sending = useStore((s) => (s.sendingPrompts[sessionId]?.length ?? 0) > 0);
+  const offlineQueued = useStore((s) => s.queuedPrompts.some((q) => q.sessionId === sessionId));
 
   if (!session) return null;
+  // Nothing has happened here yet: offer the workflows in place of the empty
+  // transcript. Stays up while a picked workflow waits for its first prompt.
+  const showPicker =
+    canCreate &&
+    showsNewSessionView(session, { loaded: !!loaded, events: events?.length ?? 0, sending, offlineQueued });
   // Both halves matter: the server says a sign-in is required, and the client
   // still is signed out — so a re-login elsewhere retires the button with no
   // server sweep.
@@ -374,7 +387,9 @@ export function SessionView({ sessionId }: { sessionId: string }) {
         </>
       )}
       <Divider />
-      {workflow && session.workflow && <WorkflowStepper session={session} workflow={workflow} />}
+      {/* While the picker is up the stepper rides over the picker's reserved top
+          slot instead (below), so picking a card never shoves the cards down. */}
+      {workflow && session.workflow && !showPicker && <WorkflowStepper session={session} workflow={workflow} />}
       {session.status === 'error' && session.errorMessage && (
         <Alert color="red" icon={<IconAlertTriangle size={16} />} m="md" py={6}>
           <Group gap="sm" wrap="nowrap" justify="space-between">
@@ -444,6 +459,15 @@ export function SessionView({ sessionId }: { sessionId: string }) {
           requestedAt={requestedAt}
           onRetry={retryLoad}
         />
+      ) : showPicker ? (
+        <div className={pickerStyles.stack}>
+          <NewSessionPicker session={session} />
+          {workflow && session.workflow && (
+            <div className={pickerStyles.stepperSlot}>
+              <WorkflowStepper session={session} workflow={workflow} />
+            </div>
+          )}
+        </div>
       ) : (
         <Transcript sessionId={sessionId} events={events ?? []} stepCount={workflow?.steps.length} />
       )}
