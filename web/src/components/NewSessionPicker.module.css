@@ -180,6 +180,8 @@
 }
 
 .thumb {
+  /* Explicit: Chromium 130 (Electron 33) does not stretch an aspect-ratio child of a column-flex <button>, so it shrank to its content. */
+  width: 100%;
   aspect-ratio: 16 / 10;
   overflow: hidden;
   background: radial-gradient(
