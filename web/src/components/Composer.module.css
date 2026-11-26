@@ -624,6 +624,38 @@
   cursor: not-allowed;
 }
 
+/* Dictation footer: "Send after insert" toggle and the ⌘/Ctrl hint. The
+   negative margins run it edge to edge under the popover's 14px padding. */
+
+.dictationFooter {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 2px -14px -14px;
+  padding: 8px 14px;
+  border-top: 1px solid var(--composer-border);
+  color: var(--composer-muted);
+  font-size: 11.5px;
+}
+
+.dictationFooterLabel {
+  padding-left: 6px;
+  color: var(--composer-muted);
+  font-size: 11.5px;
+}
+
+.dictationHint {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.dictationHint[data-active] {
+  color: var(--composer-text);
+}
+
 /* Context window (ContextWindowIndicator, desktop) */
 
 .context {

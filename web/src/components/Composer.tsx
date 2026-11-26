@@ -6,6 +6,7 @@ import {
   Button,
   Drawer,
   Group,
+  Kbd,
   Loader,
   Menu,
   Modal,
@@ -13,13 +14,14 @@ import {
   Popover,
   Select,
   Stack,
+  Switch,
   Text,
   ThemeIcon,
   Tooltip,
   UnstyledButton,
   type MantineTransition,
 } from '@mantine/core';
-import { useHover } from '@mantine/hooks';
+import { useHover, useLocalStorage } from '@mantine/hooks';
 import {
   IconAdjustmentsHorizontal,
   IconAlertTriangle,
@@ -89,6 +91,7 @@ import { send } from '../ws';
 import { formatElapsed, useVoiceDictation } from '../lib/useVoiceDictation';
 import { DictateButton, VoiceLimitNotice } from './DictateButton';
 import { useIsPhone } from '../lib/layout';
+import { MOD } from '../lib/platform';
 import { prepareAttachment } from '../lib/imageDownscale';
 import styles from './Composer.module.css';
 
@@ -528,6 +531,42 @@ export function Composer({ session }: { session: SessionMeta }) {
   const nothingToSend = voice === 'idle' && !prompt.text.trim() && attachments.length === 0;
   const preparing = pendingFiles.length > 0;
   const cannotSend = nothingToSend || preparing || machineBlock !== null || !canPrompt;
+
+  // The dictation popover's primary button inserts the transcript and, with
+  // "Send after insert" on (the default, remembered per browser), sends it too.
+  // Holding ⌘/Ctrl flips that for one click. Listeners live only for the
+  // recording; blur clears a key released outside the window.
+  const [sendAfterInsert, setSendAfterInsert] = useLocalStorage({
+    key: 'lines.dictationSendAfterInsert',
+    defaultValue: true,
+  });
+  const [modHeld, setModHeld] = useState(false);
+  useEffect(() => {
+    if (voice !== 'recording') return;
+    const onKey = (e: KeyboardEvent) => setModHeld(e.metaKey || e.ctrlKey);
+    // Esc cancels the recording and closes the popover. Bubble phase, so a
+    // nearer Esc owner (the mention menu) handles the key first and wins.
+    const onKeyDown = (e: KeyboardEvent) => {
+      onKey(e);
+      if (e.key !== 'Escape' || e.defaultPrevented) return;
+      e.preventDefault();
+      dictation.cancel();
+    };
+    const onBlur = () => setModHeld(false);
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup', onKey);
+    window.addEventListener('blur', onBlur);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keyup', onKey);
+      window.removeEventListener('blur', onBlur);
+      setModHeld(false);
+    };
+    // `dictation.cancel` touches only refs and setters, so the closure from the
+    // render that started recording stays valid.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [voice]);
+  const insertSends = sendAfterInsert !== modHeld && !cannotSend;
 
   // Focus the prompt on a session this tab just created. Keyed on the store's
   // create intent rather than `createdAt`, which is stamped on the bridge machine's
@@ -1083,11 +1122,42 @@ export function Composer({ session }: { session: SessionMeta }) {
             <UnstyledButton
               className={styles.primaryButton}
               onMouseDown={(e) => e.preventDefault()}
-              onClick={() => void dictation.finish()}
+              // Sending goes through submit(), which finishes the recording and
+              // sends once the transcript lands. When sending is blocked it
+              // still inserts.
+              onClick={(e) => {
+                const sends = sendAfterInsert !== (e.metaKey || e.ctrlKey);
+                if (sends && !cannotSend) submit();
+                else void dictation.finish();
+              }}
+              aria-label={`${insertSends ? 'Insert & send' : 'Insert text'} (hold ${MOD} to ${
+                sendAfterInsert ? 'insert only' : 'insert & send'
+              })`}
             >
-              <IconCheck size={13} />
-              Insert text
+              {insertSends ? <IconSend size={13} /> : <IconCheck size={13} />}
+              {insertSends ? 'Insert & send' : 'Insert text'}
             </UnstyledButton>
+          </div>
+          <div className={styles.dictationFooter}>
+            <Switch
+              size="xs"
+              label="Send after insert"
+              checked={sendAfterInsert}
+              onChange={(e) => setSendAfterInsert(e.currentTarget.checked)}
+              onMouseDown={(e) => e.preventDefault()}
+              classNames={{ label: styles.dictationFooterLabel }}
+            />
+            <span className={styles.dictationHint} data-active={modHeld || undefined}>
+              {modHeld ? (
+                <>
+                  <Kbd size="xs">{MOD}</Kbd> {sendAfterInsert ? 'insert only' : 'insert & send'}
+                </>
+              ) : (
+                <>
+                  Hold <Kbd size="xs">{MOD}</Kbd> to {sendAfterInsert ? 'insert only' : 'insert & send'}
+                </>
+              )}
+            </span>
           </div>
         </div>
       </Popover.Dropdown>

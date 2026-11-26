@@ -146,6 +146,8 @@ approval staging when they press Send.
 - the bridge's transcribe timeout scales with the recording's length, so a long clip on a slow
   machine is not cut short; the client waits a fixed margin longer than that budget
 - Send while recording or transcribing finishes the recording and sends once the transcript is spliced in; a failed or empty transcription sends nothing and leaves the prompt as it was
+- While dictating, a click on Insert text inserts the transcript and sends it when "Send after insert" is on (the default, remembered per browser), and only inserts when it is off; holding ⌘/Ctrl flips that choice for that click. Enter in the prompt sends the same way, and when sending is blocked (no prompt capability, or the machine cannot run the prompt) a click only inserts and Enter does nothing.
+- Esc while recording cancels the dictation and closes the popover, discarding the audio and any transcript still in flight; an open @-mention menu takes the first Esc instead.
 - a Send pressed while dictating survives leaving the session: the transcript is appended to the prompt as it stood at Send and sent to that session, and its draft is cleared. Dictation that was not sent is still dropped when the composer unmounts, and the mic is released either way
 - dictation in a card field (an "Other…" answer, a plan-comment note) only fills or appends text;
   it never picks an option, advances, saves or submits. Those fields show the mic only with the

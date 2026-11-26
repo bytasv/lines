@@ -1,6 +1,16 @@
 {
   "web": [
     {
+      "version": "0.1.49",
+      "date": "2026-11-26",
+      "items": [
+        {
+          "text": "While dictating, Insert now sends your message too: turn off \"Send after insert\" to only insert, hold ⌘ (Ctrl on Windows) to do the other for one click, and press Esc to cancel.",
+          "image": "web-0.1.49-dictation-send.png"
+        }
+      ]
+    },
+    {
       "version": "0.1.48",
       "date": "2026-11-24",
       "items": [
