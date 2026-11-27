@@ -24,6 +24,7 @@ import {
   subagentParentId,
 } from '@lines/shared';
 import type { ResultSpendPayload } from '@lines/shared';
+import { mcpGroupKey, mcpToolTitle } from './mcpTools.ts';
 
 export interface ToolBlock {
   type: 'tool';
@@ -1653,9 +1654,36 @@ export function toolDiff(tool: ToolBlock): ToolDiff | null {
 /** Collapsed group header, e.g. "8 actions · Read ×3, Edit ×2, Bash ×3" (first-seen order). */
 export function groupSummary(tools: ToolBlock[]): string {
   const counts = new Map<string, number>();
-  for (const t of tools) counts.set(t.name, (counts.get(t.name) ?? 0) + 1);
+  // An MCP tool reads by its humanized name (`Linear · Create issue`), not `mcp__linear__create_issue`.
+  for (const t of tools) {
+    const name = mcpToolTitle(t.name) ?? t.name;
+    counts.set(name, (counts.get(name) ?? 0) + 1);
+  }
   const parts = [...counts.entries()].map(([name, n]) => `${name} ×${n}`);
   return `${tools.length} action${tools.length === 1 ? '' : 's'} · ${parts.join(', ')}`;
+}
+
+/** One part of a step's tally: a built-in tool, or every call to one MCP provider. */
+export interface TallyPart {
+  /** Set for an MCP provider: the server, for its logo. */
+  server?: string;
+  label: string;
+  count: number;
+}
+
+/**
+ * {@link groupSummary} as parts, for a tally that renders logos: MCP calls merge
+ * per provider (`Linear ×2`), built-in tools stay per tool, first-seen order.
+ */
+export function groupTally(tools: ToolBlock[]): TallyPart[] {
+  const parts = new Map<string, TallyPart>();
+  for (const t of tools) {
+    const { key, server, label } = mcpGroupKey(t.name);
+    const part = parts.get(key);
+    if (part) part.count++;
+    else parts.set(key, { ...(server ? { server } : {}), label, count: 1 });
+  }
+  return [...parts.values()];
 }
 
 /** Aggregate +N/−N over edit tools in a group, or null if none. */

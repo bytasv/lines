@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import { foldAgentTurns, type ToolBlock, type TranscriptItem } from '../../web/src/lib/transcript.ts';
+import { foldAgentTurns, groupTally, type ToolBlock, type TranscriptItem } from '../../web/src/lib/transcript.ts';
 import { narrationLabel, taskCarries, turnSteps, type TurnStep } from '../../web/src/lib/turnSteps.ts';
 
 /**
@@ -201,6 +201,51 @@ describe('turnSteps', () => {
     ).map((s) => s.key);
     assert.deepEqual(before, ['a1']);
     assert.deepEqual(after, ['a1', 'a3']);
+  });
+});
+
+describe('turnSteps with MCP calls', () => {
+  test('a silent MCP call reads by provider and tool, with its server for the logo', () => {
+    const out = steps([group(tool('t1', 'mcp__linear__create_issue', {}))]);
+    assert.equal(out.length, 1);
+    assert.equal(out[0].label, 'Linear · Create issue');
+    assert.equal(out[0].mcpServer, 'linear');
+  });
+
+  test('the MCP call input summary follows the title', () => {
+    const out = steps([group(tool('t1', 'mcp__vercel__get_runtime_logs', { query: 'timeout' }))]);
+    assert.match(out[0].label, /^Vercel · Get runtime logs/);
+    assert.equal(out[0].mcpServer, 'vercel');
+  });
+
+  test('a narrated step keeps its narration and gets no logo', () => {
+    const out = steps([
+      say('a1', 'Let me file the bug in the tracker now.'),
+      group(tool('t1', 'mcp__linear__create_issue', {})),
+    ]);
+    assert.equal(out[0].label, 'File the bug in the tracker now');
+    assert.equal(out[0].mcpServer, undefined);
+  });
+
+  test('a built-in tool step has no mcpServer', () => {
+    assert.equal(steps([group(tool('t1', 'Bash', { command: 'ls' }))])[0].mcpServer, undefined);
+  });
+
+  test('the tally merges MCP calls per provider', () => {
+    assert.deepEqual(
+      groupTally([
+        tool('t1', 'mcp__linear__create_issue', {}),
+        tool('t2', 'Read', { file_path: '/a' }),
+        tool('t3', 'mcp__linear__get_issue', {}),
+        tool('t4', 'mcp__vercel__list_projects', {}),
+        tool('t5', 'Read', { file_path: '/b' }),
+      ]),
+      [
+        { server: 'linear', label: 'Linear', count: 2 },
+        { label: 'Read', count: 2 },
+        { server: 'vercel', label: 'Vercel', count: 1 },
+      ],
+    );
   });
 });
 

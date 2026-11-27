@@ -1,6 +1,7 @@
 import type { ToolBlock, ToolGroupItem, TranscriptItem } from './transcript.ts';
 import { groupSummary } from './transcript.ts';
 import { toolSummary } from './toolFields.ts';
+import { humanizeToolName, mcpProvider, parseMcpToolName } from './mcpTools.ts';
 
 /**
  * One row of a folded turn's checklist (Compact level): a stretch of the turn
@@ -21,6 +22,8 @@ export interface TurnStep {
   items: TranscriptItem[];
   /** Top-level tool calls in the step, for the tally and the diff totals. */
   tools: ToolBlock[];
+  /** The MCP server of the step's first tool, when the label names that call: its logo leads the label. */
+  mcpServer?: string;
 }
 
 /**
@@ -150,7 +153,23 @@ function toolLabel(tools: ToolBlock[]): string | null {
   if (verb && target) return capped(`${verb} ${target}`);
   // `cd <repo> && …` is how agents open most shell calls; the rest says what it does.
   const summary = toolSummary(first).replace(/^cd\s+\S+\s*(?:&&|;)\s*/, '');
+  // An MCP call reads `Linear · Create issue <summary>`, not its raw `mcp__linear__create_issue`.
+  const mcp = parseMcpToolName(first.name);
+  if (mcp) {
+    const title = `${mcpProvider(mcp.server).label} · ${humanizeToolName(mcp.tool)}`;
+    return capped(summary ? `${title} ${summary}` : title);
+  }
   return summary ? `${first.name} ${summary}` : groupSummary(tools);
+}
+
+/**
+ * The MCP server whose logo leads a step's label: set only when the label is
+ * the first tool's own (no narration), and that tool is an MCP call.
+ */
+function labelServer(tools: ToolBlock[]): string | undefined {
+  const first = tools[0];
+  if (!first || str(first.input?.description)) return undefined;
+  return parseMcpToolName(first.name)?.server;
 }
 
 interface Draft {
@@ -264,12 +283,22 @@ function inferSteps(items: TranscriptItem[], live: boolean): TurnEntry[] {
     // The last step of a live turn stays active even between tool calls: the next
     // call usually lands in it, and a done→active flicker per call reads as noise.
     const status = failed ? 'failed' : live && i === lastStep ? 'active' : 'done';
+    const fromTool = entry.narration ? null : toolLabel(entry.tools);
     const label =
       entry.narration ??
-      toolLabel(entry.tools) ??
+      fromTool ??
       (entry.rawNarration ? stripMarkdown(entry.rawNarration).trim().slice(0, LABEL_CAP) : null) ??
       'Thinking';
-    return { kind: 'step', key: entry.items[0].key, label, status, items: entry.items, tools: entry.tools };
+    const mcpServer = fromTool ? labelServer(entry.tools) : undefined;
+    return {
+      kind: 'step',
+      key: entry.items[0].key,
+      label,
+      status,
+      items: entry.items,
+      tools: entry.tools,
+      ...(mcpServer ? { mcpServer } : {}),
+    };
   });
 }
 

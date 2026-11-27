@@ -296,11 +296,56 @@ export const FAILED_EVENTS: TranscriptEvent[] = [
   }),
 ];
 
+/** A session that called MCP tools: for the readable tool names and the context popover's connections. */
+export const SESSION_MCP: SessionMeta = {
+  ...SESSION_IDLE,
+  id: 'kubi-session-mcp',
+  name: 'File the deploy regression',
+};
+
+const mcpCall = (id: string, name: string, input: Record<string, unknown>, text?: string) =>
+  ev('sdk', {
+    type: 'assistant',
+    message: { content: [...(text ? [{ type: 'text', text }] : []), { type: 'tool_use', id, name, input }] },
+  });
+const mcpResult = (id: string, content: string, isError = false) =>
+  ev('sdk', { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: id, content, is_error: isError }] } });
+const mcpAsk = (requestId: string, toolName: string, resolution?: 'allow' | 'deny', resolvedBy?: 'user' | 'auto') =>
+  ev('permission', { requestId, toolName, input: {}, ...(resolution ? { resolution } : {}), ...(resolvedBy ? { resolvedBy } : {}) });
+
+/** One turn calling Vercel, Linear and Figma over MCP: allowed, allowlisted, denied and unprompted calls. */
+export const MCP_EVENTS: TranscriptEvent[] = [
+  ev('sdk', { type: 'system', subtype: 'init', model: 'claude-opus-5-5' }),
+  ev('user', { text: 'The last deploy is timing out. Find out why and file it in Linear with the design link.' }),
+  mcpCall('toolu_mcp_logs', 'mcp__vercel__get_runtime_logs', { projectId: 'prj_lines', query: 'timeout' }),
+  mcpResult('toolu_mcp_logs', '12 log lines: FUNCTION_INVOCATION_TIMEOUT on /api/sessions'),
+  mcpCall('toolu_mcp_deploy', 'mcp__vercel__get_deployment', { idOrUrl: 'dpl_8f2c' }),
+  mcpResult('toolu_mcp_deploy', '{ "state": "READY", "regions": ["fra1"] }'),
+  mcpCall('toolu_mcp_figma', 'mcp__figma__get_screenshot', { nodeId: '12:345' }),
+  mcpAsk('perm_mcp_figma', 'mcp__figma__get_screenshot'),
+  mcpAsk('perm_mcp_figma', 'mcp__figma__get_screenshot', 'deny', 'user'),
+  mcpResult('toolu_mcp_figma', 'The user denied this tool call.', true),
+  mcpAsk('perm_mcp_issue', 'mcp__linear__create_issue'),
+  mcpAsk('perm_mcp_issue', 'mcp__linear__create_issue', 'allow', 'user'),
+  mcpCall('toolu_mcp_issue', 'mcp__linear__create_issue', { title: 'Session list times out on fra1', team: 'LIN' }, 'Filing the regression in Linear.'),
+  mcpResult('toolu_mcp_issue', 'Created LIN-482'),
+  mcpAsk('perm_mcp_comment', 'mcp__linear__create_comment'),
+  mcpAsk('perm_mcp_comment', 'mcp__linear__create_comment', 'allow', 'auto'),
+  mcpCall('toolu_mcp_comment', 'mcp__linear__create_comment', { issueId: 'LIN-482', body: 'Logs attached.' }),
+  mcpResult('toolu_mcp_comment', 'Comment added'),
+  ev('sdk', {
+    type: 'assistant',
+    message: { content: [{ type: 'text', text: 'Filed **LIN-482**: `/api/sessions` hits the function timeout on fra1.' }] },
+  }),
+  ev('sdk', { type: 'result', subtype: 'success', is_error: false, duration_ms: 31_400, total_cost_usd: 0.07 }),
+];
+
 export const ALL_TRANSCRIPTS: Record<string, TranscriptEvent[]> = {
   [SESSION_IDLE.id]: CONVERSATION_EVENTS,
   [SESSION_RUNNING.id]: RUNNING_EVENTS,
   [SESSION_WAITING.id]: WAITING_EVENTS,
   [SESSION_FAILED.id]: FAILED_EVENTS,
+  [SESSION_MCP.id]: MCP_EVENTS,
 };
 
 // ---------------------------------------------------------------------------

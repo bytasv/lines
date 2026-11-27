@@ -1460,7 +1460,9 @@
         "web/src/components/CrossfadeLine.tsx",
         "web/src/components/ShimmerText.tsx",
         "web/src/lib/useChangeKey.ts",
-        "web/src/lib/activityHandoff.ts"
+        "web/src/lib/activityHandoff.ts",
+        "web/src/lib/mcpTools.ts",
+        "web/src/components/McpToolLabel.tsx"
       ],
       "symbols": [
         "Markdown",
@@ -1523,13 +1525,19 @@
         "useChangeKey",
         "recordActivity",
         "clearActivity",
-        "activityOnScreen"
+        "activityOnScreen",
+        "parseMcpToolName",
+        "humanizeToolName",
+        "mcpProvider",
+        "groupTally",
+        "McpToolLabel"
       ],
       "tests": [
         "server/src/sessions.turns.test.ts",
         "server/src/sessions.context.test.ts",
         "server/src/markdownImage.test.ts",
-        "server/src/turnSteps.test.ts"
+        "server/src/turnSteps.test.ts",
+        "server/src/mcpTools.test.ts"
       ],
       "businessRules": [
         "user and agent text render markdown instead of plain preformatted text; single newlines collapse and raw HTML tags are dropped",
@@ -1571,7 +1579,9 @@
         "a pending permission and a failed or stopped result never hide inside a turn checklist step; they render between rows and a failed result keeps its Retry action",
         "a checklist step's open state is sticky per session and every step starts closed, including the live one",
         "a checklist turn has no header line: its cost and duration sit on the last row, and the AI turn summary shows above the rows once the turn ends",
-        "a task list is a presentation source only: no event is added, and old transcripts with task calls reflow on reload"
+        "a task list is a presentation source only: no event is added, and old transcripts with task calls reflow on reload",
+        "an MCP tool name is never shown raw: it reads as provider and tool (Linear · Create issue) with the provider's logo; the raw mcp__<server>__<tool> name is only the tooltip",
+        "a provider with no brand glyph gets a monogram tile with a colour hashed from its name, never a network favicon fetch"
       ],
       "architecturalRules": [
         "user and agent transcript text share one markdown renderer instead of separate text-rendering paths; ColorizedText.tsx deleted as dead code",
@@ -2052,7 +2062,7 @@
       "id": "context-window",
       "name": "Context window",
       "doc": "features/context-window.md",
-      "purpose": "Live context-window occupancy in the composer with a per-category breakdown, plus manual compaction, a near-limit warning, and readable transcript events for both manual and CLI auto-compaction.",
+      "purpose": "Live context-window occupancy in the composer with a per-category breakdown, a connections column of the MCP providers the session called (derived from the transcript, never persisted), plus manual compaction, a near-limit warning, and readable transcript events for both manual and CLI auto-compaction.",
       "covers": [
         "context-window-inspector",
         "context-compaction"
@@ -2072,7 +2082,10 @@
         "web/src/components/ContextWindowIndicator.tsx",
         "web/src/lib/format.ts",
         "web/src/lib/transcript.ts",
-        "web/src/components/Transcript.tsx"
+        "web/src/components/Transcript.tsx",
+        "web/src/lib/mcpUsage.ts",
+        "web/src/lib/mcpTools.ts",
+        "web/src/components/McpToolLabel.tsx"
       ],
       "symbols": [
         "ContextUsage",
@@ -2097,14 +2110,18 @@
         "SessionManager.compactContext",
         "SessionManager.abandonCompaction",
         "SessionManager.restoreCompactedStatus",
-        "LiveState.compactResume"
+        "LiveState.compactResume",
+        "summarizeMcpUsage",
+        "McpUsage",
+        "McpConnectionsUsed"
       ],
       "tests": [
         "server/src/sessions.context.test.ts",
         "server/src/contextBreakdown.test.ts",
         "server/src/sessions.compact.test.ts",
         "server/src/workflows.advance.test.ts",
-        "server/src/sessions.reconcile.test.ts"
+        "server/src/sessions.reconcile.test.ts",
+        "server/src/mcpUsage.test.ts"
       ],
       "businessRules": [
         "occupancy is sourced from the SDK's /context control request (getContextUsage()) when a live query exists, never from result.usage, which is cumulative across every API call in the turn rather than a point-in-time reading",
@@ -2124,7 +2141,10 @@
         "a workflow step parked waiting-approval does not block the manual button — every step hand-off reads the on-disk transcript (withoutCompactSpans), never the CLI's live context; only a live advance (WorkflowState.advancing) blocks, since it is about to prompt the next step",
         "a compaction over a parked or failed step runs as an ordinary 'running' turn, so its status is snapshotted (LiveState.compactResume) and restored on every path that ends the turn — the result settle branch, abandonCompaction (stop, dead query), and reconcileWithWorker re-deriving the park from stepStatuses after a bridge restart — so the session never strands on 'done' or loses a failed step's banner",
         "while a parked step compacts, WorkflowEngine holds approve/force-advance/retry and queues a typed prompt instead of pushing a second turn under the in-flight /compact; a queued prompt drains into the same step (never advances) once the compaction settles",
-        "a compaction is invisible to every workflow turn scan (consolidateStepOutput, lastAssistantText, summarizeTurn, retryTurn) via withoutCompactSpans, but never stripped from permission bookkeeping"
+        "a compaction is invisible to every workflow turn scan (consolidateStepOutput, lastAssistantText, summarizeTurn, retryTurn) via withoutCompactSpans, but never stripped from permission bookkeeping",
+        "MCP usage (calls, errors, access) is derived in the browser from the session's transcript and is never persisted or synced; it is memoized on the transcript's event array",
+        "MCP access is attributed per tool name, not per call, since permission events carry no tool-use id; the popover labels it as how access was granted, not a per-call record",
+        "MCP server status (the status dots and error text) is owner-only: the browser requests it only for the owner, and a guest sees no status"
       ],
       "architecturalRules": [
         "the bridge-worker protocol gained a generic ask/askResult request-response method rather than a one-off message type, so future control requests do not require another PROTOCOL_VERSION bump (which restarts the worker and drops in-flight turns)",

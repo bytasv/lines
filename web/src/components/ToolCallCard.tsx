@@ -29,6 +29,8 @@ import {
 } from '../lib/transcript';
 import { isAgentTool } from '../lib/agents';
 import { BODY_CAP, toolFields, toolSummary, type ToolField } from '../lib/toolFields';
+import { parseMcpToolName } from '../lib/mcpTools';
+import { McpToolLabel } from './McpToolLabel';
 import { QuestionReview } from './QuestionPrompt';
 import { TaskBody, TaskHeader } from './TaskCall';
 import { UiProposal } from './UiProposal';
@@ -251,13 +253,21 @@ export const ToolCallCard = memo(function ToolCallCard({
             <TaskHeader tool={tool} nested={nested} />
           ) : (
             <>
-              <Badge
-                variant="light"
-                color={tool.isError ? 'red' : editTool ? 'teal' : 'blue'}
-                tt="none"
-              >
-                {tool.name}
-              </Badge>
+              {/* An MCP call reads by provider and tool, not `mcp__server__tool` (that is the tooltip). */}
+              {parseMcpToolName(tool.name) ? (
+                <McpToolLabel
+                  tool={tool.name}
+                  color={tool.isError ? 'var(--mantine-color-red-text)' : undefined}
+                />
+              ) : (
+                <Badge
+                  variant="light"
+                  color={tool.isError ? 'red' : editTool ? 'teal' : 'blue'}
+                  tt="none"
+                >
+                  {tool.name}
+                </Badge>
+              )}
               <Text size="xs" c="dimmed" ff="monospace" truncate style={{ flex: 1 }}>
                 {toolSummary(tool)}
               </Text>

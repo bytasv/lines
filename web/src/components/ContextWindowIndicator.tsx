@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   Box,
   Button,
@@ -16,12 +16,13 @@ import {
   type MantineTransition,
 } from '@mantine/core';
 import { useHover } from '@mantine/hooks';
-import { IconAlertTriangle, IconChevronRight } from '@tabler/icons-react';
+import { IconAlertTriangle, IconChevronRight, IconPlugConnected } from '@tabler/icons-react';
 import type {
   ContextBreakdown,
   ContextCategory,
   ContextSummary,
   ContextUsage,
+  McpServerStatusInfo,
   SessionMeta,
 } from '@lines/shared';
 import {
@@ -34,7 +35,10 @@ import {
 } from '@lines/shared';
 import { sessionCaps } from '../lib/capabilities';
 import { useStore } from '../store';
-import { useSessionMachineHealth } from '../lib/can';
+import { useIsGuestOnSession, useSessionMachineHealth } from '../lib/can';
+import { humanizeToolName, mcpProvider } from '../lib/mcpTools';
+import { mcpCallCount, summarizeMcpUsage, type McpAccess, type McpUsage } from '../lib/mcpUsage';
+import { McpLogo } from './McpToolLabel';
 import { useReveal } from '../lib/layout';
 import { send } from '../ws';
 import { formatDuration, formatSpendUsd, formatTokens, withLiveSpend } from '../lib/format';
@@ -499,6 +503,153 @@ function FallbackBody({ usage }: { usage: ContextUsage }) {
   );
 }
 
+/** The CLI's own form of a server name in tool names: anything outside `[A-Za-z0-9_-]` becomes `_`. */
+function toolServerName(name: string): string {
+  return name.replace(/[^A-Za-z0-9_-]/g, '_');
+}
+
+const STATUS_COLOR: Record<McpServerStatusInfo['status'], string> = {
+  connected: 'var(--mantine-color-green-6)',
+  pending: 'var(--mantine-color-yellow-6)',
+  'needs-auth': 'var(--mantine-color-orange-6)',
+  failed: 'var(--mantine-color-red-6)',
+  disabled: 'var(--mantine-color-gray-5)',
+};
+
+const STATUS_LABEL: Record<McpServerStatusInfo['status'], string> = {
+  connected: 'Connected',
+  pending: 'Connecting',
+  'needs-auth': 'Needs sign-in',
+  failed: 'Failed to connect',
+  disabled: 'Disabled',
+};
+
+const ACCESS_CHIPS: { key: keyof McpAccess; label: string; color: string }[] = [
+  { key: 'user', label: 'You allowed', color: 'var(--mantine-color-green-text)' },
+  { key: 'auto', label: 'Allowlist', color: 'var(--mantine-color-blue-text)' },
+  { key: 'denied', label: 'You denied', color: 'var(--mantine-color-red-text)' },
+  { key: 'unprompted', label: 'No prompt', color: 'var(--composer-faint)' },
+];
+
+function AccessChips({ access, calls }: { access: McpAccess; calls: number }) {
+  return (
+    <span className={styles.cpChips}>
+      {ACCESS_CHIPS.filter((c) => access[c.key] > 0).map((c) => (
+        <span key={c.key} className={styles.cpChip} style={{ color: c.color }}>
+          {c.label}
+          {calls > 1 ? ` ${access[c.key]}` : ''}
+        </span>
+      ))}
+    </span>
+  );
+}
+
+/**
+ * The popover's right column: one card per MCP provider the session called,
+ * expandable to its tools, how often each ran and how its access was granted;
+ * an empty state until the first call. Connected servers nothing called are not
+ * listed: Settings → Connections owns that view. Everything but the status dot
+ * comes from the transcript (see summarizeMcpUsage). `statuses` is the owner's
+ * alone — a guest passes none, so sees no status dot.
+ */
+function McpConnectionsUsed({
+  usage,
+  breakdown,
+  statuses,
+  open,
+  toggle,
+}: {
+  usage: McpUsage[];
+  breakdown: ContextBreakdown | null;
+  statuses: McpServerStatusInfo[] | undefined;
+  open: Set<string>;
+  toggle: (key: string) => void;
+}) {
+  const statusOf = (server: string) => statuses?.find((s) => toolServerName(s.name) === server);
+  const tokensOf = (server: string) =>
+    breakdown?.mcpServers.find((s) => toolServerName(s.serverName) === server)?.tokens;
+  return (
+    <div className={styles.contextPopover}>
+      {/* No heading over the empty state: the placeholder says it all. */}
+      {usage.length > 0 && <span className={styles.cpHeading}>Connections used</span>}
+      {usage.length === 0 ? (
+        <div className={styles.cpEmpty}>
+          <span className={styles.cpEmptyIcon}>
+            <IconPlugConnected size={20} stroke={1.5} />
+          </span>
+          <span className={styles.cpEmptyTitle}>No connections used yet</span>
+          <span className={styles.cpNote}>
+            When the agent calls an MCP tool, the provider shows up here with its calls, context cost and how
+            access was granted.
+          </span>
+        </div>
+      ) : (
+        <div className={styles.cpRows}>
+          {usage.map((u) => {
+            const key = `mcp:${u.server}`;
+            const expanded = open.has(key);
+            const status = statusOf(u.server);
+            const tokens = tokensOf(u.server);
+            return (
+              <div key={u.server} className={styles.cpCard}>
+                <UnstyledButton
+                  className={styles.cpCardHead}
+                  onClick={() => toggle(key)}
+                  aria-expanded={expanded}
+                >
+                  <IconChevronRight
+                    size={12}
+                    style={{
+                      flexShrink: 0,
+                      transform: expanded ? 'rotate(90deg)' : undefined,
+                      transition: 'transform 150ms',
+                    }}
+                  />
+                  <McpLogo server={u.server} size={20} />
+                  <span className={styles.cpCardTitle} title={u.server}>
+                    {mcpProvider(u.server).label}
+                  </span>
+                  {status && (
+                    <Tooltip label={status.error ?? STATUS_LABEL[status.status]} withArrow multiline maw={240}>
+                      <span className={styles.cpStatusDot} style={{ background: STATUS_COLOR[status.status] }} />
+                    </Tooltip>
+                  )}
+                  <span className={styles.cpCardMeta}>
+                    {u.calls} call{u.calls === 1 ? '' : 's'}
+                    {u.errors > 0 && <span style={{ color: 'var(--mantine-color-red-text)' }}> · {u.errors} failed</span>}
+                    {tokens != null && ` · ${formatTokens(tokens)}`}
+                  </span>
+                </UnstyledButton>
+                <Collapse expanded={expanded} transitionDuration={150}>
+                  <div className={styles.cpCardBody}>
+                    {u.tools.map((t) => (
+                      <div key={t.tool} className={styles.cpToolRow}>
+                        <span className={styles.cpKey} title={`mcp__${u.server}__${t.tool}`}>
+                          {humanizeToolName(t.tool)}
+                        </span>
+                        <span className={styles.cpValue}>
+                          ×{t.calls}
+                          {t.errors > 0 && (
+                            <span style={{ color: 'var(--mantine-color-red-text)' }}> · {t.errors} failed</span>
+                          )}
+                        </span>
+                        <AccessChips access={t.access} calls={t.calls} />
+                      </div>
+                    ))}
+                    <span className={styles.cpNote}>
+                      How access was granted, matched by tool name — not a per-call record.
+                    </span>
+                  </div>
+                </Collapse>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /**
  * Context occupancy for the session's last settled turn — distinct from the
  * cumulative spend shown next to it. Prefers the SDK's `/context` breakdown
@@ -516,6 +667,15 @@ export function ContextWindowIndicator({
   const models = useStore((s) => s.models);
   const entry = useStore((s) => s.contextBreakdowns[session.id]);
   const requestContextBreakdown = useStore((s) => s.requestContextBreakdown);
+  const requestMcpStatus = useStore((s) => s.requestMcpStatus);
+  // MCP server status names the host's configured servers: the owner's alone,
+  // the same gate as the Connections pane (the server answers owners only).
+  const isGuest = useIsGuestOnSession(session.id);
+  const mcpStatuses = useStore((s) => (isGuest ? undefined : s.mcpStatus[session.id]));
+  // Derived from settled transcript events (the store flushes before anyone
+  // reads them) and memoized on the array, which only changes on a flush.
+  const events = useStore((s) => s.transcripts[session.id]);
+  const mcpUsage = useMemo(() => (events ? summarizeMcpUsage(events) : []), [events]);
   // Settled total plus the in-flight turn's live estimate, while one runs.
   const liveSpend = useStore((s) => s.turnSpend[session.id]);
   const cost = withLiveSpend(session.totalCostUsd, liveSpend, hasEstimatedSpend(session.costByModel));
@@ -527,10 +687,11 @@ export function ContextWindowIndicator({
       sessionCaps(session).contextWindow
     ) {
       requestContextBreakdown(session.id);
+      if (!isGuest) requestMcpStatus(session.id);
     }
   }, [
     inline, hasReading, health.connected, health.bridgeAttached,
-    session.id, session.model, requestContextBreakdown,
+    session.id, session.model, requestContextBreakdown, isGuest, requestMcpStatus,
   ]);
   // Expansion state must live here, not in the dropdown: the Popover unmounts its
   // dropdown on close, which would reset it every time the pointer leaves.
@@ -661,7 +822,30 @@ export function ContextWindowIndicator({
       )}
     </Stack>
   );
-  if (inline) return content;
+  const mcpCalls = mcpCallCount(mcpUsage);
+  const connected = (mcpStatuses ?? []).some((s) => s.status !== 'disabled');
+  const showMcp = mcpCalls > 0 || connected;
+  const connections = showMcp ? (
+    <McpConnectionsUsed
+      usage={mcpUsage}
+      breakdown={entry?.breakdown ?? null}
+      statuses={mcpStatuses}
+      open={open}
+      toggle={toggle}
+    />
+  ) : null;
+
+  if (inline) {
+    return connections ? (
+      <Stack gap="xs">
+        {content}
+        <Divider />
+        {connections}
+      </Stack>
+    ) : (
+      content
+    );
+  }
 
   // The composer's popover: what fills the window, the session's totals, and
   // compaction — the categories keep their per-item detail behind a click.
@@ -766,8 +950,11 @@ export function ContextWindowIndicator({
     <Popover
       opened={opened}
       onChange={setOpened}
-      onOpen={() => requestContextBreakdown(session.id)}
-      width="min(354px, calc(100vw - 2rem))"
+      onOpen={() => {
+        requestContextBreakdown(session.id);
+        if (!isGuest) requestMcpStatus(session.id);
+      }}
+      width={showMcp ? 'min(680px, calc(100vw - 2rem))' : 'min(354px, calc(100vw - 2rem))'}
       position="top-end"
       offset={14}
       withArrow
@@ -782,7 +969,11 @@ export function ContextWindowIndicator({
       <Popover.Target>
         <UnstyledButton
           className={styles.context}
-          aria-label="Context window usage"
+          aria-label={
+            mcpCalls > 0
+              ? `Context window usage, ${mcpCalls} MCP call${mcpCalls === 1 ? '' : 's'} to ${mcpUsage.length} provider${mcpUsage.length === 1 ? '' : 's'}`
+              : 'Context window usage'
+          }
           style={{ opacity: stale ? 0.45 : 1 }}
           onClick={() => setOpened((o) => !o)}
         >
@@ -812,11 +1003,35 @@ export function ContextWindowIndicator({
           {/* Passive warning only: compaction is lossy, irreversible and billable,
               so it stays a decision the user makes. */}
           {nearLimit && <IconAlertTriangle size={12} color="var(--mantine-color-orange-6)" />}
+          {mcpCalls > 0 && (
+            <Box component="span" visibleFrom="sm" className={styles.contextMcp}>
+              <span className={styles.contextLogos}>
+                {mcpUsage.slice(0, 3).map((u, i) => (
+                  <McpLogo
+                    key={u.server}
+                    server={u.server}
+                    size={14}
+                    ring="var(--composer-surface)"
+                    style={{ marginLeft: i === 0 ? 0 : -4, zIndex: 3 - i, position: 'relative' }}
+                  />
+                ))}
+                {mcpUsage.length > 3 && <span className={styles.contextMore}>+{mcpUsage.length - 3}</span>}
+              </span>
+              {mcpCalls} call{mcpCalls === 1 ? '' : 's'}
+            </Box>
+          )}
         </UnstyledButton>
       </Popover.Target>
       <Popover.Dropdown p={16}>
         <ScrollArea.Autosize mah={480} type="auto">
-          {popoverContent}
+          {connections ? (
+            <div className={styles.cpGrid}>
+              {popoverContent}
+              <div className={styles.cpSide}>{connections}</div>
+            </div>
+          ) : (
+            popoverContent
+          )}
         </ScrollArea.Autosize>
       </Popover.Dropdown>
     </Popover>

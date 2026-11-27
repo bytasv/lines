@@ -3,10 +3,11 @@ import { Box, Collapse, Group, Stack, Text } from '@mantine/core';
 import { IconCheck, IconExclamationMark, type Icon } from '@tabler/icons-react';
 import { activityOnScreen, type ActivityHandoff } from '../lib/activityHandoff';
 import { MAIN_AGENT_META } from '../lib/agents';
-import { groupDiffTotals, groupSummary, type TranscriptItem } from '../lib/transcript';
+import { groupDiffTotals, groupTally, type TranscriptItem } from '../lib/transcript';
 import type { TurnEntry, TurnStep } from '../lib/turnSteps';
 import { useChangeKey } from '../lib/useChangeKey';
 import { CrossfadeLine } from './CrossfadeLine';
+import { McpLogo } from './McpToolLabel';
 import { Reveal } from './Reveal';
 import { ShimmerText } from './ShimmerText';
 
@@ -16,9 +17,12 @@ interface LabelValue {
   status: TurnStep['status'];
   /** Only on a hand-off from the activity row: its ` · 12s`. */
   suffix?: string;
+  /** The MCP server the label names a call to: its logo leads the text. */
+  mcpServer?: string;
 }
 
-const sameLabel = (a: LabelValue, b: LabelValue) => a.label === b.label && a.status === b.status;
+const sameLabel = (a: LabelValue, b: LabelValue) =>
+  a.label === b.label && a.status === b.status && a.mcpServer === b.mcpServer;
 
 // Every label is dimmed but a failure's; in progress, dimmed is the shimmer's base
 // colour, so the ellipsis matches the sweep.
@@ -27,6 +31,9 @@ const labelTone = (v: LabelValue) =>
 
 const renderLabel = (v: LabelValue) => (
   <>
+    {v.mcpServer && (
+      <McpLogo server={v.mcpServer} size={14} style={{ marginRight: 6, verticalAlign: '-2px' }} />
+    )}
     {v.status === 'active' ? <ShimmerText>{v.label}</ShimmerText> : v.label}
     {v.suffix}
   </>
@@ -132,7 +139,10 @@ const StepRow = memo(function StepRow({
    *  and crossfades to its own icon and label. Read once, at mount. */
   intro: ActivityHandoff | null;
 }) {
-  const label = useMemo<LabelValue>(() => ({ label: step.label, status: step.status }), [step.label, step.status]);
+  const label = useMemo<LabelValue>(
+    () => ({ label: step.label, status: step.status, mcpServer: step.mcpServer }),
+    [step.label, step.status, step.mcpServer],
+  );
   // The figures appear on a row that is already there (the first spend estimate):
   // fade them in. Moving to a new last row needs nothing, that row grows in.
   const metaKey = useChangeKey(meta != null);
@@ -148,7 +158,8 @@ const StepRow = memo(function StepRow({
   const { tally, totals } = useMemo(
     () => ({
       // One call is already named by the label; a tally would only repeat it.
-      tally: step.tools.length > 1 ? groupSummary(step.tools) : null,
+      // MCP calls merge per provider (`Linear ×2`), each with its logo.
+      tally: step.tools.length > 1 ? groupTally(step.tools) : null,
       totals: groupDiffTotals(step.tools),
     }),
     [step.tools],
@@ -193,8 +204,17 @@ const StepRow = memo(function StepRow({
         </Group>
         <Group gap={6} wrap="nowrap" style={{ flexShrink: 0 }}>
           {tally && (
-            <Text size="xs" c="dimmed" visibleFrom="xs">
-              {tally}
+            <Text size="xs" c="dimmed" visibleFrom="xs" component="div">
+              <Group gap={4} wrap="nowrap">
+                {step.tools.length} actions ·
+                {tally.map((part, i) => (
+                  <Group key={part.server ?? part.label} gap={3} wrap="nowrap">
+                    {part.server && <McpLogo server={part.server} size={11} />}
+                    {part.label} ×{part.count}
+                    {i < tally.length - 1 ? ',' : ''}
+                  </Group>
+                ))}
+              </Group>
             </Text>
           )}
           {totals && (

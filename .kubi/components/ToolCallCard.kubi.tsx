@@ -52,3 +52,37 @@ export const Failed = {
     },
   },
 };
+export const McpTool = {
+  args: {
+    tool: {
+      type: 'tool',
+      id: 'toolu_mcp_issue',
+      name: 'mcp__linear__create_issue',
+      input: { title: 'Session list times out on fra1', team: 'LIN' },
+      result: 'Created LIN-482',
+    },
+  },
+};
+export const McpToolUnknownProvider = {
+  args: {
+    tool: {
+      type: 'tool',
+      id: 'toolu_mcp_acme',
+      name: 'mcp__acme_tracker__listOpenTickets',
+      input: { assignee: 'me' },
+      result: '3 tickets',
+    },
+  },
+};
+export const McpToolFailed = {
+  args: {
+    tool: {
+      type: 'tool',
+      id: 'toolu_mcp_figma',
+      name: 'mcp__figma__get_screenshot',
+      input: { nodeId: '12:345' },
+      result: 'The user denied this tool call.',
+      isError: true,
+    },
+  },
+};

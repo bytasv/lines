@@ -96,6 +96,10 @@ How everything in the transcript is drawn: text, tool calls, and subagent runs.
 - `web/src/lib/turnSteps.ts` — `turnSteps` (steps and passthrough entries for one turn), `taskCarries`
   (open tasks each turn starts with), `narrationLabel`, `TurnStep`, `TurnPassthrough`, `TurnEntry`,
   `TaskState`; pure, runtime-importing only `groupSummary`/`toolSummary` plus types
+- `web/src/lib/mcpTools.ts` — `parseMcpToolName`, `humanizeToolName`, `mcpProvider`, `mcpToolTitle`,
+  `mcpGroupKey`: an MCP tool's `mcp__<server>__<tool>` name as a provider and a readable tool name
+- `web/src/components/McpToolLabel.tsx` — `McpToolLabel` (logo tile, dimmed provider, tool name) and
+  `McpLogo`, shared by the tool card, the checklist and the context popover
 - `web/src/components/TurnChecklist.tsx` — `TurnChecklist` and its `StepRow` (expand state, status
   icon, tally and diff totals); passthrough items draw through `Transcript`'s `Item`
 - `web/src/components/Reveal.tsx`, `web/src/components/CrossfadeLine.tsx`,
@@ -349,7 +353,9 @@ flat list. Steps come from one of two sources:
 Status: `failed` when any tool in the step has `isError`; `active` on the last step while the turn is
 live and its card is the transcript's tail (text streaming below the card settles it to done);
 `pending` for a listed task not yet started; otherwise `done`. Each row's tally and `+N −N` totals
-come from `groupSummary` and `groupDiffTotals`, and the turn's cost and duration move to the last row.
+come from `groupTally` (the logo form of `groupSummary`) and `groupDiffTotals`, and the turn's cost
+and duration move to the last row. An MCP step labelled by its tool, not narration, carries its
+server as `mcpServer` so its logo leads the label.
 
 Passthrough items (a pending permission, a failed, stopped or recovering result, an interjection, live
 streaming text) render between rows and never inside a step. A successful result gets no entry. A
@@ -629,6 +635,12 @@ they belong to the card and not to the compaction.
   and a failed result keeps its Retry action.
 - A step's open or closed state is sticky per session, so rebuilds, remounts and session switches don't reset it;
   every step starts closed, including the live one.
+- An MCP tool name is never shown raw: it reads as its provider and tool (`Linear · Create issue`),
+  with the provider's logo. The raw `mcp__<server>__<tool>` name is kept only as the tooltip. The
+  server name ends at the first `__`, so a server name containing `__` would split wrongly.
+- A provider with no brand glyph in the web table gets a monogram tile with a colour hashed from its
+  name, and never a network favicon fetch: a fetch would tell a third party which services the user
+  connects.
 - A checklist turn has no header line: its cost and duration sit on the last row, and the AI turn summary (when
   summaries are on) shows above the rows once the turn ends.
 - The activity row ("Thinking…") is hidden once a checklist shows, except while a plan or UI mock is being written,

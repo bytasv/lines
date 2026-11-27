@@ -771,6 +771,188 @@
   line-height: 13.5px;
 }
 
+/* MCP usage: the chip's provider logos, and the popover's second column. */
+
+.contextMcp {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: 2px;
+  padding-left: 7px;
+  border-left: 1px solid var(--composer-border);
+}
+
+.contextLogos {
+  display: flex;
+  align-items: center;
+}
+
+.contextMore {
+  margin-left: 3px;
+  color: var(--composer-faint);
+  font-size: 11px;
+}
+
+.cpGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 20px;
+}
+
+.cpSide {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding-left: 20px;
+  border-left: 1px solid var(--composer-border);
+}
+
+/* The grid stretches the column to the breakdown's height; its content follows,
+   so an empty state can centre in all of it. */
+.cpSide > .contextPopover {
+  flex: 1;
+}
+
+@media (max-width: 600px) {
+  .cpGrid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .cpSide {
+    padding-top: 16px;
+    padding-left: 0;
+    border-top: 1px solid var(--composer-border);
+    border-left: 0;
+  }
+}
+
+.cpHeading {
+  color: var(--composer-faint);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 13px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.cpEmpty {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 24px 12px;
+  text-align: center;
+}
+
+.cpEmptyIcon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  margin-bottom: 4px;
+  border-radius: 50%;
+  color: var(--composer-faint);
+  background: var(--composer-hover);
+}
+
+.cpEmptyTitle {
+  color: var(--composer-text);
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 14.5px;
+}
+
+.cpEmpty .cpNote {
+  max-width: 240px;
+}
+
+.cpCard {
+  border: 1px solid var(--composer-border);
+  border-radius: 10px;
+}
+
+.cpCardHead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 9px;
+  border-radius: 10px;
+  color: var(--composer-muted);
+}
+
+.cpCardHead:hover {
+  background: var(--composer-hover);
+}
+
+.cpCardTitle {
+  overflow: hidden;
+  color: var(--composer-text);
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 14.5px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.cpStatusDot {
+  width: 7px;
+  height: 7px;
+  flex-shrink: 0;
+  border-radius: 4px;
+}
+
+.cpCardMeta {
+  margin-left: auto;
+  flex-shrink: 0;
+  color: var(--composer-faint);
+  font-size: 11.5px;
+  line-height: 13.5px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.cpCardBody {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 2px 10px 9px 29px;
+}
+
+.cpToolRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: 8px;
+  row-gap: 3px;
+}
+
+.cpToolRow .cpKey {
+  overflow: hidden;
+  min-width: 0;
+  flex: 1;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.cpChips {
+  display: flex;
+  flex-basis: 100%;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.cpChip {
+  padding: 1px 6px;
+  border: 1px solid var(--composer-border);
+  border-radius: 6px;
+  font-size: 10.5px;
+  line-height: 13px;
+}
+
 @keyframes composer-fade-in {
   from {
     opacity: 0;

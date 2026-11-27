@@ -3,6 +3,7 @@ import { withSessionStore, withTranscriptPane } from '../decorators';
 import {
   CONVERSATION_EVENTS,
   FAILED_EVENTS,
+  MCP_EVENTS,
   RUNNING_EVENTS,
   SESSION_EMPTY,
   SESSION_FAILED,
@@ -32,3 +33,5 @@ export const Running = { args: { sessionId: SESSION_RUNNING.id, events: RUNNING_
 export const WaitingPermission = { args: { sessionId: SESSION_WAITING.id, events: WAITING_EVENTS } };
 export const FailedTurn = { args: { sessionId: SESSION_FAILED.id, events: FAILED_EVENTS } };
 export const Empty = { args: { sessionId: SESSION_EMPTY.id, events: [] } };
+// The idle session's meta with an MCP turn: the events are the story's, not the store's.
+export const McpCalls = { args: { sessionId: SESSION_IDLE.id, events: MCP_EVENTS } };

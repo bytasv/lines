@@ -17,7 +17,10 @@ corrects the occupancy reading afterwards.
 
 ## Entry points
 
-- Composer toolbar `ContextWindowIndicator` chip, next to the cumulative `totalCostUsd` text.
+- Composer toolbar `ContextWindowIndicator` chip, next to the cumulative `totalCostUsd` text. Once
+  the session has MCP calls, the chip also shows up to three provider logos and the call count.
+- The popover's "Connections used" column: MCP providers the session called, with their calls,
+  context cost and how access was granted.
 - `ContextWindowIndicator`'s "Compact now" button (in its popover).
 - Passive near-limit warning badge on the same indicator.
 
@@ -41,7 +44,11 @@ corrects the occupancy reading afterwards.
 - `web/src/lib/transcript.ts` — `'context-compact'` event → `ContextCompactItem`
 - `web/src/components/Transcript.tsx` — `ContextCompactMarker`
 - `web/src/components/ContextWindowIndicator.tsx` — ring chip, popover, `CompactButton`,
-  near-limit badge
+  near-limit badge, `McpConnectionsUsed` (the popover's connections column)
+- `web/src/lib/mcpUsage.ts` — `summarizeMcpUsage`: MCP calls and access per server and tool, read
+  from the transcript
+- `web/src/lib/mcpTools.ts`, `web/src/components/McpToolLabel.tsx` — provider names and logos
+  shared with the transcript (see [transcript-rendering](transcript-rendering.md))
 - `web/src/lib/format.ts` — `formatTokens`, `usageColor`
 
 ## Symbols
@@ -189,6 +196,13 @@ ring/warning from `effectiveContextTokens` on every `SessionMeta` update.
   never persisted.
 - A popover-triggered summary refresh only upserts (broadcasts + syncs) when the summary actually
   changed, so opening the popover repeatedly does not generate sync traffic.
+- MCP usage (calls, errors, access) is derived in the browser from the session's transcript and
+  is never persisted or synced; it is memoized on the transcript's event array.
+- Access is attributed per tool name, not per call: permission events carry no tool-use id. The
+  popover says so. "You allowed" and "You denied" count resolutions by a person; "Allowlist" counts
+  rule-based approvals; "No prompt" is calls with no permission card.
+- MCP server status (the connected/failed dots, and the server's error text) is owner-only. The
+  browser asks for it only for the owner, and a guest sees no status and no status dots.
 - When a workflow step resets the Claude session (fresh start), `contextResetAt` is stamped; any
   reading older than that is rendered as stale (dimmed ring, explanatory footnote) until the
   next turn reports a fresh value — the underlying conversation it described no longer exists.

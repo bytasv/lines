@@ -1,6 +1,16 @@
 {
   "web": [
     {
+      "version": "0.1.50",
+      "date": "2026-11-27",
+      "items": [
+        {
+          "text": "The context ring in the composer now shows which MCP connections a session used: open it to see each provider's calls and how access was granted, and MCP calls in the transcript read as a logo and a plain name like \"Linear · Create issue\".",
+          "image": "web-0.1.50-mcp-connections.png"
+        }
+      ]
+    },
+    {
       "version": "0.1.49",
       "date": "2026-11-26",
       "items": [
